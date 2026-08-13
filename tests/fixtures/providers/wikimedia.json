@@ -1,0 +1,18 @@
+{
+  "pageid": 456,
+  "title": "File:Roman laundry.jpg",
+  "imageinfo": [{
+    "url": "https://upload.wikimedia.org/roman-laundry.jpg",
+    "thumburl": "https://upload.wikimedia.org/roman-laundry-thumb.jpg",
+    "descriptionurl": "https://commons.wikimedia.org/wiki/File:Roman_laundry.jpg",
+    "width": 2400,
+    "height": 1600,
+    "extmetadata": {
+      "LicenseShortName": {"value": "Public domain"},
+      "LicenseUrl": {"value": "https://creativecommons.org/publicdomain/mark/1.0/"},
+      "Artist": {"value": "Museum photographer"},
+      "ObjectName": {"value": "Roman laundry"},
+      "Credit": {"value": "Museum collection"}
+    }
+  }]
+}

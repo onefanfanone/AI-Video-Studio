@@ -1,0 +1,127 @@
+version: 1
+project:
+  id: __PROJECT_ID__
+  title: __PROJECT_TITLE__
+  script_file: script.txt
+
+voice:
+  provider: moneyprinter_edge
+  profile: yunyang_soft
+  pronunciation: {}
+  pauses: {}
+
+canvas:
+  width: 1080
+  height: 1920
+  fps: 30
+  motion:
+    working_scale: 2
+    zoom_amount: 0.035
+    easing: cosine
+
+pacing:
+  hook_until_seconds: 5.0
+  hook_shot_seconds: [1.5, 2.0]
+  body_shot_seconds: [3.0, 4.0]
+
+subtitles:
+  alignment_provider: moneyprinter_whisper
+  whisper_model: large-v3
+  whisper_auto_download: false
+  whisper_device: cuda
+  whisper_compute_type: float16
+  minimum_alignment_coverage: 0.98
+  style_preset: social_pink
+  font_auto_download: false
+  font_fallback: Microsoft YaHei
+  max_chars_per_line: 8
+  max_lines: 1
+  target_chars_per_cue: 6
+  min_cue_seconds: 0.3
+  max_cue_seconds: 2.0
+  preserve_short_punctuation_cues: true
+  minimum_short_cue_chars: 2
+  emphasis:
+    mode: hybrid
+    include: []
+    exclude: []
+    proper_nouns: []
+
+media:
+  raw_dir: ../../raw
+  seed: __MEDIA_SEED__
+  exclude:
+    - Better call Saul.jpg
+    - desktop.ini
+  video_shots: 2
+  video_source_offsets:
+    IMG_0986.MOV: [30.0, 180.0]
+  default_landscape_fit: blur
+  default_portrait_fit: crop
+  assets: {}
+
+audio:
+  normalize_lufs: -16
+
+jianying:
+  draft_root: null
+  draft_name_prefix: __DRAFT_PREFIX__
+
+output:
+  publish_ready: false
+  preview_filename: preview_TEST_NOT_FOR_PUBLISH.mp4
+
+task:
+  resume_policy: explicit
+
+visuals:
+  mode: sourced
+  strategy: museum_and_ai
+  planner:
+    provider: deepseek
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    thinking: disabled
+    response_format: json_object
+    prompt_version: scene-plan-v3
+    semantic_audit:
+      enabled: true
+      provider: deepseek
+      max_repair_rounds: 2
+      failure_policy: manual_review
+  search:
+    providers: [met, smithsonian, wikimedia, openverse]
+    allowed_rights: [pdm-1.0, cc0-1.0]
+    candidates_per_shot: 6
+    min_long_edge: 1024
+    min_short_edge: 640
+    recommendation_threshold: 75
+    semantic_review:
+      enabled: true
+      provider: deepseek
+      shots_per_batch: 4
+      reject_below: 40
+      recommendation_threshold: 75
+      failure_policy: manual_review
+  ai_fallback:
+    enabled: true
+    provider: comfyui_local
+    candidate_policy: all_shots
+    candidates_per_shot: 4
+    server_url: http://127.0.0.1:8000
+    workflow_file: ../../history_image_api.json
+    prompt_marker: __AI_VIDEO_PROMPT__
+    style: cinematic_historical_reconstruction
+    width: 768
+    height: 1344
+    timeout_seconds: 900
+    model_license_url: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo
+    output_format: jpeg
+    max_images_per_run: all_candidates
+    regeneration_headroom: 4
+  review:
+    required: true
+    semantic_override: warning_confirm
+    disclosure: end_only
+    disclosure_text: 部分画面为 AI 历史重构
+    disclosure_seconds: 2.0

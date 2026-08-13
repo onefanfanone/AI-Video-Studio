@@ -1,0 +1,28 @@
+{
+  "id": "edanmdm-test",
+  "title": "Roman vessel",
+  "unitCode": "FSG",
+  "content": {
+    "descriptiveNonRepeating": {
+      "title": {"content": "Roman vessel"},
+      "record_link": "https://www.si.edu/object/test",
+      "online_media": {
+        "media": [
+          {
+            "content": "https://ids.si.edu/ids/deliveryService?id=cc0",
+            "thumbnail": "https://ids.si.edu/ids/deliveryService?id=cc0&max=300",
+            "width": 1800,
+            "height": 1200,
+            "usage": {"access": "CC0"}
+          },
+          {
+            "content": "https://ids.si.edu/ids/deliveryService?id=restricted",
+            "thumbnail": "https://ids.si.edu/ids/deliveryService?id=restricted&max=300",
+            "usage": {"access": "Usage conditions apply"}
+          }
+        ]
+      }
+    },
+    "freetext": {"name": [{"label": "Maker", "content": "Unknown artist"}]}
+  }
+}

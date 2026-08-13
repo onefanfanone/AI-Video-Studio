@@ -1,0 +1,65 @@
+version: 1
+presets:
+  history_clean:
+    font_name: Source Han Sans SC Heavy
+    font_size: 76
+    draft_font_size: 9.5
+    base_color: "#FFFFFF"
+    highlight_color: "#FFFFFF"
+    outline: 5
+    draft_outline: 34
+    shadow: 2
+    margin_bottom: 340
+    draft_transform_y: -0.55
+    max_line_width: 0.86
+  history_keyword:
+    font_name: Source Han Sans SC Heavy
+    font_size: 76
+    draft_font_size: 9.5
+    base_color: "#FFFFFF"
+    highlight_color: "#FFD54A"
+    outline: 5
+    draft_outline: 34
+    shadow: 2
+    margin_bottom: 340
+    draft_transform_y: -0.55
+    max_line_width: 0.86
+  history_hook:
+    font_name: Source Han Sans SC Heavy
+    font_size: 76
+    draft_font_size: 9.5
+    base_color: "#FFFFFF"
+    highlight_color: "#FFD54A"
+    outline: 5
+    draft_outline: 34
+    shadow: 2
+    margin_bottom: 340
+    draft_transform_y: -0.55
+    max_line_width: 0.86
+  social_pink:
+    font_name: PangMenZhengDao-Cu
+    font_file: "%LOCALAPPDATA%/JianyingPro/User Data/Cache/effect/7265611032465248805/06caadf2c04504ea78873cfad51447a3/庞门正道粗书体.ttf"
+    draft_font_type: 庞门正道粗书体
+    font_size: 118
+    draft_font_size: 14.75
+    bold: false
+    letter_spacing: 2
+    draft_letter_spacing: 1
+    base_color: "#FFE3EC"
+    highlight_color: "#FFF3B0"
+    outline_color: "#FF5C91"
+    draft_outline_color: "#FF5C91"
+    outline: 8
+    draft_outline: 48
+    shadow_color: "#851F49"
+    shadow_opacity: 0.82
+    shadow: 5
+    draft_shadow_alpha: 0.78
+    draft_shadow_diffuse: 8
+    draft_shadow_distance: 5
+    draft_shadow_angle: -45
+    margin_bottom: 460
+    draft_transform_y: -0.42
+    max_line_width: 0.94
+    fade_in_ms: 150
+    fade_out_ms: 150

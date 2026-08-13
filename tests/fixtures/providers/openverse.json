@@ -1,0 +1,13 @@
+{
+  "id": "ov-1",
+  "title": "Ancient vessel",
+  "creator": "Unknown",
+  "source": "wikimedia",
+  "foreign_landing_url": "https://example.org/source",
+  "url": "https://example.org/original.jpg",
+  "thumbnail": "https://example.org/thumb.jpg",
+  "license": "pdm",
+  "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+  "width": 1600,
+  "height": 1200
+}

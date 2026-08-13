@@ -1,0 +1,14 @@
+app/**
+config/**
+release/**
+tests/**
+tools/**
+.env.local.example
+.gitignore
+AGENTS.md
+LICENSE
+README.md
+THIRD_PARTY_NOTICES.md
+history_image_api.json
+requirements.txt
+run.bat

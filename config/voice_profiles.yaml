@@ -1,0 +1,32 @@
+version: 1
+profiles:
+  yunxi_current_reference:
+    label: 云希 +8%（旧版对照）
+    voice: zh-CN-YunxiNeural
+    rate: "+8%"
+    pitch: "+0Hz"
+  yunxi_natural:
+    label: 云希自然叙事
+    voice: zh-CN-YunxiNeural
+    rate: "+0%"
+    pitch: "-2Hz"
+  yunxi_calm:
+    label: 云希沉稳叙事
+    voice: zh-CN-YunxiNeural
+    rate: "-4%"
+    pitch: "-4Hz"
+  yunyang_soft:
+    label: 云扬舒缓叙事
+    voice: zh-CN-YunyangNeural
+    rate: "-2%"
+    pitch: "-2Hz"
+  yunyang_clear:
+    label: 云扬清晰叙事
+    voice: zh-CN-YunyangNeural
+    rate: "+4%"
+    pitch: "+0Hz"
+  yunjian_story:
+    label: 云健故事感
+    voice: zh-CN-YunjianNeural
+    rate: "-4%"
+    pitch: "-2Hz"

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "python": {
+    "version": "3.12.10",
+    "filename": "python-3.12.10-amd64.exe",
+    "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe",
+    "license_url": "https://docs.python.org/3/license.html",
+    "required_in_release": true,
+    "sha256": null,
+    "note": "Release builder refuses unverified assets. Pin the SHA-256 after downloading from python.org."
+  },
+  "ffmpeg": {
+    "version": "7.1",
+    "filename": "ffmpeg-n7.1-win64-gpl.zip",
+    "source": "BtbN/FFmpeg-Builds",
+    "build_variant": "win64-gpl",
+    "license": "GPL-3.0-or-later",
+    "license_url": "https://ffmpeg.org/legal.html",
+    "source_offer": "https://github.com/BtbN/FFmpeg-Builds",
+    "required_in_release": true,
+    "sha256": null,
+    "note": "Use a fixed BtbN n7.1 win64-gpl artifact and record its published checksum before release."
+  },
+  "not_bundled": [
+    "Whisper models",
+    "CUDA runtime",
+    "ComfyUI",
+    "image-generation models",
+    "Jianying fonts"
+  ]
+}

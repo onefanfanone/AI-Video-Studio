@@ -1,0 +1,17 @@
+{
+  "accepted": {
+    "objectID": 123,
+    "isPublicDomain": true,
+    "primaryImage": "https://images.metmuseum.org/original.jpg",
+    "primaryImageSmall": "https://images.metmuseum.org/thumb.jpg",
+    "objectURL": "https://www.metmuseum.org/art/collection/search/123",
+    "title": "Roman jar",
+    "artistDisplayName": "Unknown Roman"
+  },
+  "rejected": {
+    "objectID": 124,
+    "isPublicDomain": false,
+    "primaryImage": "https://images.metmuseum.org/closed.jpg",
+    "objectURL": "https://www.metmuseum.org/art/collection/search/124"
+  }
+}

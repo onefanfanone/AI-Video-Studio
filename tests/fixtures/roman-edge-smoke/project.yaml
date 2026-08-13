@@ -1,0 +1,78 @@
+version: 1
+project:
+  id: roman-edge-smoke
+  title: 离线全链路测试
+  script_file: script.txt
+
+voice:
+  provider: moneyprinter_edge
+  profile: yunxi_natural
+  pronunciation:
+    韦斯巴芗: 韦斯巴香
+  pauses: {}
+
+canvas:
+  width: 1080
+  height: 1920
+  fps: 30
+
+pacing:
+  hook_until_seconds: 5.0
+  hook_shot_seconds: [1.5, 2.0]
+  body_shot_seconds: [3.0, 4.0]
+
+subtitles:
+  # Deliberately uses Edge's word-boundary metadata so CI/smoke tests never
+  # download the multi-GB Whisper model. Production projects use Whisper.
+  alignment_provider: edge_metadata
+  minimum_alignment_coverage: 0.98
+  style_preset: history_keyword
+  font_auto_download: false
+  font_fallback: Microsoft YaHei
+  max_chars_per_line: 12
+  max_lines: 2
+  target_chars_per_cue: 16
+  min_cue_seconds: 0.8
+  max_cue_seconds: 2.8
+  emphasis:
+    mode: hybrid
+    include:
+      - 大陶罐
+      - 撒尿
+      - 光着脚
+      - 氨
+      - 尿液征税
+      - 有味道吗
+      - 没有味道
+    exclude: []
+    proper_nouns:
+      - 古罗马
+      - 韦斯巴芗
+
+media:
+  raw_dir: ../../../raw
+  seed: 20260810
+  exclude:
+    - Better call Saul.jpg
+    - desktop.ini
+  video_shots: 2
+  video_source_offsets:
+    IMG_0986.MOV: [30.0, 180.0]
+  default_landscape_fit: blur
+  default_portrait_fit: crop
+  assets: {}
+
+audio:
+  background_music: null
+  background_music_volume: 0.12
+
+jianying:
+  draft_root: C:/Users/onefan/AppData/Local/JianyingPro/User Data/Projects/com.lveditor.draft
+  draft_name_prefix: AI-Roman-Smoke
+
+output:
+  publish_ready: false
+  preview_filename: preview_TEST_NOT_FOR_PUBLISH.mp4
+
+task:
+  resume_policy: explicit
