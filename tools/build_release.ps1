@@ -9,7 +9,10 @@ $destination = Join-Path $repo $OutputDirectory
 $public = Join-Path $destination "AI-Video-Studio"
 if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
 New-Item -ItemType Directory -Path $destination | Out-Null
-& (Join-Path $repo ".venv\Scripts\python.exe") (Join-Path $repo "tools\build_public_export.py") --destination $public
+$temporaryExport = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-video-studio-release-" + [Guid]::NewGuid().ToString("N"))
+& (Join-Path $repo ".venv\Scripts\python.exe") (Join-Path $repo "tools\build_public_export.py") --destination $temporaryExport
+if ($LASTEXITCODE -ne 0) { throw "The public source export failed its whitelist or sensitive-data checks." }
+Move-Item -LiteralPath $temporaryExport -Destination $public
 $verified = @{}
 foreach ($entry in @($lock.python, $lock.ffmpeg)) {
   if (-not $entry.sha256) { throw "release/assets.lock.json has no verified SHA-256 for $($entry.filename)." }
@@ -33,8 +36,11 @@ Copy-Item -LiteralPath $ffmpegExe.FullName -Destination $ffmpegBin
 Copy-Item -LiteralPath $ffprobeExe.FullName -Destination $ffmpegBin
 $wheelhouse = Join-Path $public "wheelhouse"
 New-Item -ItemType Directory -Path $wheelhouse -Force | Out-Null
-& (Join-Path $repo ".venv\Scripts\python.exe") -m pip download --requirement (Join-Path $repo "requirements.txt") --dest $wheelhouse --only-binary=:all:
+& (Join-Path $repo ".venv\Scripts\python.exe") -m pip wheel --requirement (Join-Path $repo "requirements.txt") --wheel-dir $wheelhouse
 if ($LASTEXITCODE -ne 0) { throw "Unable to build the pinned offline wheelhouse." }
 Remove-Item -LiteralPath $ffmpegStaging -Recurse -Force
-Compress-Archive -LiteralPath $public -DestinationPath (Join-Path $destination "AI-Video-Studio-windows-x64.zip") -CompressionLevel Optimal
+$releaseZip = Join-Path $destination "AI-Video-Studio-windows-x64.zip"
+Compress-Archive -LiteralPath $public -DestinationPath $releaseZip -CompressionLevel Optimal
+$releaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseZip).Hash.ToLowerInvariant()
+Set-Content -LiteralPath ($releaseZip + ".sha256") -Encoding ascii -Value ($releaseHash + "  " + [IO.Path]::GetFileName($releaseZip))
 Write-Host "Release package created under $destination"
