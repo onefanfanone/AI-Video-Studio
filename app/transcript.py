@@ -6,11 +6,21 @@ from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from typing import Any, Sequence
 
+from pypinyin import Style, lazy_pinyin
+
 
 HARD_END = "。！？!?；;"
 SOFT_END = "，,：:"
 PUNCTUATION = HARD_END + SOFT_END + "、…—-“”‘’（）()《》"
 _WRAP_TOKENIZER: Any | None = None
+
+
+class AlignmentQualityError(ValueError):
+    """Alignment failed conservative quality checks, with diagnostics attached."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]):
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,7 @@ class TimedChar:
     end: float
     matched: bool
     probability: float
+    match_type: str
 
 
 def _is_semantic(char: str) -> bool:
@@ -67,17 +78,37 @@ def _recognized_chars(words: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _is_chinese(char: str) -> bool:
+    return len(char) == 1 and "\u3400" <= char <= "\u9fff"
+
+
+def _pinyin_units(text: str) -> list[str]:
+    if not text or not all(_is_chinese(char) for char in text):
+        return []
+    return [
+        syllable.casefold().replace("u:", "v").replace("ü", "v")
+        for syllable in lazy_pinyin(
+            text,
+            style=Style.NORMAL,
+            strict=False,
+            errors=lambda value: list(value),
+        )
+    ]
+
+
 def align_script_to_words(
     script: str,
     words: Sequence[dict[str, Any]],
     *,
     audio_duration: float,
-) -> tuple[list[TimedChar], float, str]:
+    phonetic_matching: bool = True,
+    max_phonetic_span_chars: int = 4,
+) -> tuple[list[TimedChar], dict[str, Any], str]:
     """Align Whisper text to the canonical script and interpolate rare mismatches."""
     script_units = _semantic_units(script)
     recognized = _recognized_chars(words)
-    if not script_units or not recognized:
-        raise ValueError("文案或 Whisper 逐词结果为空，无法对齐。")
+    if not script_units:
+        raise ValueError("文案没有可对齐的有效字符。")
     matcher = SequenceMatcher(
         None,
         [char for _, char in script_units],
@@ -85,13 +116,97 @@ def align_script_to_words(
         autojunk=False,
     )
     mapping: dict[int, dict[str, Any]] = {}
-    matched_count = 0
-    for block in matcher.get_matching_blocks():
-        for offset in range(block.size):
-            script_index = script_units[block.a + offset][0]
-            mapping[script_index] = recognized[block.b + offset]
-            matched_count += 1
-    coverage = matched_count / len(script_units)
+    exact_count = 0
+    phonetic_count = 0
+    missing_count = 0
+    unexpected_count = 0
+    max_missing_run = 0
+    max_unexpected_run = 0
+    conflict_count = 0
+    mismatches: list[dict[str, Any]] = []
+    for tag, script_start, script_end, recognized_start, recognized_end in matcher.get_opcodes():
+        script_span = script_units[script_start:script_end]
+        recognized_span = recognized[recognized_start:recognized_end]
+        if tag == "equal":
+            for offset, (script_index, _) in enumerate(script_span):
+                mapping[script_index] = {
+                    **recognized_span[offset],
+                    "match_type": "exact",
+                }
+                exact_count += 1
+            continue
+
+        script_text = "".join(script[index] for index, _ in script_span)
+        recognized_text = "".join(item["text"] for item in recognized_span)
+        script_pinyin = _pinyin_units(script_text)
+        recognized_pinyin = _pinyin_units(recognized_text)
+        accepted = bool(
+            phonetic_matching
+            and tag == "replace"
+            and 0 < len(script_span) == len(recognized_span) <= max_phonetic_span_chars
+            and script_pinyin
+            and script_pinyin == recognized_pinyin
+        )
+        if accepted:
+            classification = "phonetic_match"
+            for offset, (script_index, _) in enumerate(script_span):
+                mapping[script_index] = {
+                    **recognized_span[offset],
+                    "match_type": "phonetic",
+                }
+                phonetic_count += 1
+        elif tag == "delete":
+            classification = "missing"
+        elif tag == "insert":
+            classification = "unexpected"
+        else:
+            classification = "conflict"
+            conflict_count += 1
+
+        if not accepted:
+            missing_count += len(script_span)
+            unexpected_count += len(recognized_span)
+            max_missing_run = max(max_missing_run, len(script_span))
+            max_unexpected_run = max(max_unexpected_run, len(recognized_span))
+        mismatches.append(
+            {
+                "operation": tag,
+                "classification": classification,
+                "accepted": accepted,
+                "script_text": script_text,
+                "recognized_text": recognized_text,
+                "script_start": script_span[0][0] if script_span else None,
+                "script_end": script_span[-1][0] + 1 if script_span else None,
+                "recognized_start": recognized_start,
+                "recognized_end": recognized_end,
+                "start": recognized_span[0]["start"] if recognized_span else None,
+                "end": recognized_span[-1]["end"] if recognized_span else None,
+                "script_pinyin": script_pinyin,
+                "recognized_pinyin": recognized_pinyin,
+            }
+        )
+
+    script_total = len(script_units)
+    recognized_total = len(recognized)
+    diagnostics = {
+        "schema_version": 1,
+        "matcher_version": "phonetic-v1",
+        "exact_coverage": exact_count / script_total,
+        "phonetic_coverage": (exact_count + phonetic_count) / script_total,
+        "coverage": (exact_count + phonetic_count) / script_total,
+        "missing_ratio": missing_count / script_total,
+        "unexpected_ratio": unexpected_count / max(1, recognized_total),
+        "script_char_count": script_total,
+        "recognized_char_count": recognized_total,
+        "exact_char_count": exact_count,
+        "phonetic_char_count": phonetic_count,
+        "missing_char_count": missing_count,
+        "unexpected_char_count": unexpected_count,
+        "maximum_missing_run_chars": max_missing_run,
+        "maximum_unexpected_run_chars": max_unexpected_run,
+        "conflict_count": conflict_count,
+        "mismatches": mismatches,
+    }
 
     semantic_indexes = [index for index, _ in script_units]
     semantic_position = {script_index: position for position, script_index in enumerate(semantic_indexes)}
@@ -116,7 +231,7 @@ def align_script_to_words(
             end = min(end, following_time)
         return start, max(start + 0.01, end), 0.0
 
-    semantic_timing: dict[int, tuple[float, float, bool, float]] = {}
+    semantic_timing: dict[int, tuple[float, float, bool, float, str]] = {}
     for script_index in semantic_indexes:
         if script_index in mapping:
             item = mapping[script_index]
@@ -125,10 +240,17 @@ def align_script_to_words(
                 float(item["end"]),
                 True,
                 float(item["probability"]),
+                str(item.get("match_type", "exact")),
             )
         else:
             start, end, probability = interpolated(script_index)
-            semantic_timing[script_index] = (start, end, False, probability)
+            semantic_timing[script_index] = (
+                start,
+                end,
+                False,
+                probability,
+                "interpolated",
+            )
 
     timed: list[TimedChar] = []
     last_end = 0.0
@@ -136,7 +258,7 @@ def align_script_to_words(
         if char.isspace():
             continue
         if index in semantic_timing:
-            start, end, matched, probability = semantic_timing[index]
+            start, end, matched, probability, match_type = semantic_timing[index]
         else:
             previous = next(
                 (semantic_timing[item] for item in reversed(semantic_indexes) if item < index),
@@ -151,13 +273,16 @@ def align_script_to_words(
             end = min(max(start + 0.01, end), start + 0.08)
             matched = True
             probability = 1.0
+            match_type = "punctuation"
         start = max(last_end, min(start, audio_duration))
         end = max(start + 0.01, min(max(end, start + 0.01), audio_duration))
-        timed.append(TimedChar(char, index, start, end, matched, probability))
+        timed.append(
+            TimedChar(char, index, start, end, matched, probability, match_type)
+        )
         last_end = end
 
     recognized_text = "".join(item["text"] for item in recognized)
-    return timed, coverage, recognized_text
+    return timed, diagnostics, recognized_text
 
 
 def wrap_caption(text: str, max_chars_per_line: int, max_lines: int) -> str:
@@ -466,14 +591,75 @@ def build_transcript(
     audio_duration: float,
     subtitle_config: dict[str, Any],
 ) -> tuple[dict[str, Any], list[Cue], list[dict[str, Any]]]:
-    chars, coverage, recognized_text = align_script_to_words(
-        script, alignment.get("words", []), audio_duration=audio_duration
+    phonetic_matching = bool(subtitle_config.get("phonetic_matching", True))
+    max_phonetic_span_chars = int(
+        subtitle_config.get("max_phonetic_span_chars", 4)
+    )
+    chars, diagnostics, recognized_text = align_script_to_words(
+        script,
+        alignment.get("words", []),
+        audio_duration=audio_duration,
+        phonetic_matching=phonetic_matching,
+        max_phonetic_span_chars=max_phonetic_span_chars,
     )
     minimum_coverage = float(subtitle_config.get("minimum_alignment_coverage", 0.98))
-    if coverage + 1e-9 < minimum_coverage:
-        raise ValueError(
-            f"Whisper 与原文匹配覆盖率只有 {coverage:.2%}，低于要求的 {minimum_coverage:.2%}。"
+    maximum_missing_ratio = float(subtitle_config.get("maximum_missing_ratio", 0.01))
+    maximum_unresolved_run_chars = int(
+        subtitle_config.get("maximum_unresolved_run_chars", 3)
+    )
+    diagnostics.update(
+        {
+            "provider": alignment.get("engine", "faster-whisper"),
+            "model": alignment.get("model"),
+            "device": alignment.get("device"),
+            "minimum_coverage": minimum_coverage,
+            "maximum_missing_ratio": maximum_missing_ratio,
+            "maximum_unresolved_run_chars": maximum_unresolved_run_chars,
+            "phonetic_matching": phonetic_matching,
+            "max_phonetic_span_chars": max_phonetic_span_chars,
+            "recognized_text": recognized_text,
+        }
+    )
+    failure_reasons: list[str] = []
+    if diagnostics["coverage"] + 1e-9 < minimum_coverage:
+        failure_reasons.append(
+            f"有效覆盖率 {diagnostics['coverage']:.2%} 低于 {minimum_coverage:.2%}"
         )
+    if diagnostics["missing_ratio"] > maximum_missing_ratio + 1e-9:
+        failure_reasons.append(
+            f"真正缺失比例 {diagnostics['missing_ratio']:.2%} 高于 {maximum_missing_ratio:.2%}"
+        )
+    if diagnostics["maximum_missing_run_chars"] > maximum_unresolved_run_chars:
+        failure_reasons.append(
+            f"连续缺失 {diagnostics['maximum_missing_run_chars']} 字"
+        )
+    if diagnostics["maximum_unexpected_run_chars"] > maximum_unresolved_run_chars:
+        failure_reasons.append(
+            f"连续额外识别 {diagnostics['maximum_unexpected_run_chars']} 字"
+        )
+    if diagnostics["conflict_count"]:
+        failure_reasons.append(
+            f"存在 {diagnostics['conflict_count']} 处非同音替换"
+        )
+    diagnostics["result"] = "failed" if failure_reasons else "passed"
+    diagnostics["failure_reasons"] = failure_reasons
+    if failure_reasons:
+        unresolved = [
+            item for item in diagnostics["mismatches"] if not item["accepted"]
+        ][:4]
+        details = "；".join(
+            f"原稿“{item['script_text'] or '∅'}”→识别“{item['recognized_text'] or '∅'}”"
+            for item in unresolved
+        )
+        message = (
+            "Whisper 对齐质量未通过："
+            + "；".join(failure_reasons)
+            + f"。精确匹配 {diagnostics['exact_coverage']:.2%}，"
+            + f"拼音容错后 {diagnostics['phonetic_coverage']:.2%}。"
+        )
+        if details:
+            message += f"问题片段：{details}。"
+        raise AlignmentQualityError(message, diagnostics)
     cue_payloads = build_caption_cues(chars, subtitle_config)
     events = apply_emphasis(
         script,
@@ -486,12 +672,7 @@ def build_transcript(
         "normalized_script": script,
         "audio_duration": audio_duration,
         "alignment": {
-            "provider": alignment.get("engine", "faster-whisper"),
-            "model": alignment.get("model"),
-            "device": alignment.get("device"),
-            "coverage": coverage,
-            "minimum_coverage": minimum_coverage,
-            "recognized_text": recognized_text,
+            **diagnostics,
         },
         "limits": {
             "max_chars_per_line": int(subtitle_config.get("max_chars_per_line", 12)),

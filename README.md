@@ -91,9 +91,13 @@ scene-plan-v3 按每个话题动态生成时代、地区、必需和禁止元素
 
 默认 `social_pink` 是单行最多 8 字的粉色粗书体，带约 150ms 淡入淡出。MP4 使用 ASS，剪映使用可编辑富文本；只有通过字体文件和剪映映射检查的样式才能同时生成两种输出。
 
+Whisper 对齐保留 98% 的有效覆盖率门槛。程序先按锁定原稿做精确字符匹配，再只对双方等长、每侧不超过 4 个汉字且逐字无声调拼音完全相同的替换作保守容错；例如识别成同音字时沿用 Whisper 时间，但成片字幕仍显示锁定原稿。数字、英文、漏句、额外插话、长片段和非同音替换不会被该规则放行。
+
+`transcript.json` 和 `alignment_diagnostics.json` 会分别记录 `exact_coverage`（精确覆盖率）、`phonetic_coverage`/`coverage`（同音校正后的有效覆盖率）、真正缺失与额外识别比例，以及每个差异片段。即使质量判定失败，也会先保存诊断文件，便于判断是同音误识别还是真正漏读。
+
 ## 输出与剪映
 
-每次运行写入 `<工作区>/outputs/<project>-<run-id>`，包括 MP4、旁白、transcript、SRT/ASS、视觉计划、候选与选择、授权台账、storyboard v2、task、validation 和构建报告。
+每次运行写入 `<工作区>/outputs/<project>-<run-id>`，包括 MP4、旁白、transcript、`alignment_diagnostics.json`、SRT/ASS、视觉计划、候选与选择、授权台账、storyboard v2、task、validation 和构建报告。
 
 剪映草稿默认发现：
 
@@ -126,6 +130,7 @@ scene-plan-v3 按每个话题动态生成时代、地区、必需和禁止元素
 - 夜间不想联网搜索馆藏：选择“纯 AI”。
 - ComfyUI 不可用：确认本机服务地址和工作流测试通过。
 - Whisper 模型缺失：把完整 faster-whisper `large-v3` 放到 `<工作区>/runtime/models/whisper-large-v3/`。
+- Whisper 对齐未通过：查看任务目录中的 `alignment_diagnostics.json`。同音短替换会自动校正并记录；真正漏读、额外插话、数字或英文变化仍需重新配音或修改读音提示后再运行。
 - 剪映草稿失败：关闭剪映后从首页继续任务。
 
 离线测试不会访问真实 DeepSeek、馆藏 API 或 ComfyUI，也不产生费用：

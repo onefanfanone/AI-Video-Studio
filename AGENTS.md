@@ -108,7 +108,8 @@ DeepSeek 候选复核只读取必要文字元数据，拍摄/数字化年份不�
 ## 6. 配音、字幕、画面与剪映约束
 
 - MoneyPrinterTurbo 固定为 1.3.3、提交 `b4218dd66851acf2e19d4aa5f10252b08380f742`，只能安装在工作区 `runtime/mpt-venv`。主项目不得导入 MPT 的顶层 `app` 包，只通过 JSON 和子进程调用 worker。
-- Whisper 正式项目必须使用本地 `large-v3` 对齐，原文覆盖率低于 98% 时失败，不能静默退回估算时间轴。
+- Whisper 正式项目必须使用本地 `large-v3` 对齐。先做精确字符锚定，再仅接受等长、每侧不超过 4 个纯汉字且逐字无声调拼音完全一致的短替换；字幕始终保留锁定原稿并沿用 Whisper 时间。最终有效覆盖率低于 98%、真正缺失超过 1%、连续未解决片段超过 3 字，或存在非同音替换时必须失败，不能静默退回估算时间轴。
+- 每次字幕对齐都写 `alignment_diagnostics.json`，成功和失败均记录精确覆盖率、同音容错后的有效覆盖率、缺失/额外识别比例及差异分类。不得使用话题专属同音词表放宽规则。
 - Edge TTS 7.2.8 的 metadata 是 JSONL，offset/duration 单位为 100ns；SRT 必须由项目自己生成。
 - `transcript.json` 是字幕唯一时间轴来源；SRT 是无样式备份，ASS 用于 MP4，剪映富文本从 transcript 生成。
 - 通用字幕可使用双行 12 字 preset；账号默认 `social_pink` 是庞门正道粗书体、单行最多 8 字、粉色描边和约 150ms 渐显渐隐。账号样式只能放配置，不得硬编码进重排器。
@@ -149,7 +150,7 @@ cmd.exe /d /c "call run.bat --self-test"
 
 - MP4 为 1080×1920、30fps、H.264/AAC、`yuv420p`，时长与旁白误差不超过 0.2 秒。
 - 字幕时间单调、不重叠，并符合当前 preset 的行数、字数、时长、字体和安全区。
-- Whisper 覆盖率不低于 98%，强调词时间位于对应字幕区间。
+- Whisper 拼音容错后的有效覆盖率不低于 98%，真正缺失不超过 1%，强调词时间位于对应字幕区间。
 - storyboard 的源文件、授权、审核状态和 manifest 可互相追溯。
 - 剪映草稿包含 video、narration、subtitles；使用 AI 画面时另有 `ai_disclosure` 文字轨道。
 - `validation.json` 全部通过，`raw` 的文件名、大小和修改时间不变。

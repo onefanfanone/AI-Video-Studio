@@ -45,7 +45,13 @@ from .mpt_runtime import (
     invoke_worker,
 )
 from .task_state import TaskState, find_task_dir
-from .transcript import Cue, build_transcript, cues_from_transcript, wrap_caption as wrap_transcript_caption
+from .transcript import (
+    AlignmentQualityError,
+    Cue,
+    build_transcript,
+    cues_from_transcript,
+    wrap_caption as wrap_transcript_caption,
+)
 from .studio_settings import discover_jianying_draft_root, get_studio_paths
 from . import mpt_runtime as _mpt_runtime
 
@@ -822,6 +828,8 @@ def create_or_reuse_alignment(
     narration: Path,
     subtitle_config: dict[str, Any],
     run_dir: Path,
+    *,
+    initial_prompt: str = "",
 ) -> tuple[dict[str, Any], Path, bool]:
     cache_root = get_studio_paths(ROOT).cache_root / "alignment"
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -839,6 +847,8 @@ def create_or_reuse_alignment(
         "device": device,
         "compute_type": compute_type,
         "moneyprinterturbo": MPT_COMMIT,
+        "prompt_version": "whisper-hints-v1",
+        "initial_prompt": initial_prompt,
     }
     cache_key = hashlib.sha256(
         json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -871,6 +881,7 @@ def create_or_reuse_alignment(
                     "compute_type": compute_type,
                     "download_root": str(RUNTIME_ROOT / "models"),
                     "output_alignment": str(temporary),
+                    "initial_prompt": initial_prompt,
                 },
                 response,
             )
@@ -888,6 +899,37 @@ def create_or_reuse_alignment(
     shutil.copy2(cached, destination)
     payload = json.loads(destination.read_text(encoding="utf-8"))
     return payload, destination, cache_hit
+
+
+def whisper_initial_prompt(
+    script: str,
+    voice_config: dict[str, Any],
+    subtitle_config: dict[str, Any],
+    *,
+    maximum_chars: int = 200,
+) -> str:
+    """Build a bounded rare-term hint list without sending the full script."""
+    candidates = [
+        *[str(item) for item in (voice_config.get("pronunciation") or {}).keys()],
+        *[
+            str(item)
+            for item in (
+                subtitle_config.get("emphasis", {}).get("proper_nouns", [])
+            )
+        ],
+    ]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        term = candidate.strip()
+        if not term or term not in script or term in seen:
+            continue
+        proposed = "、".join([*selected, term])
+        if len(proposed) > maximum_chars:
+            continue
+        selected.append(term)
+        seen.add(term)
+    return "、".join(selected)
 
 
 def schedule_shots(
@@ -1915,8 +1957,16 @@ def build_project(
             else:
                 print("[3/16] 使用本地 Whisper large-v3 对齐逐词时间轴...")
                 task.begin("alignment", input_hash)
+                initial_prompt = whisper_initial_prompt(
+                    text,
+                    voice_config,
+                    subtitle_config,
+                )
                 alignment, alignment_path, alignment_cache_hit = create_or_reuse_alignment(
-                    narration, subtitle_config, run_dir
+                    narration,
+                    subtitle_config,
+                    run_dir,
+                    initial_prompt=initial_prompt,
                 )
                 task.succeed("alignment", input_hash, [alignment_path])
         elif alignment_provider == "edge_metadata":
@@ -1932,6 +1982,7 @@ def build_project(
         captions = run_dir / "captions.srt"
         captions_ass = run_dir / "captions.ass"
         transcript_path = run_dir / "transcript.json"
+        alignment_diagnostics_path = run_dir / "alignment_diagnostics.json"
         emphasis_path = run_dir / "emphasis.json"
         font_dir = run_dir / "working" / "fonts"
         if task.can_reuse("captions", input_hash):
@@ -1949,11 +2000,15 @@ def build_project(
                         audio_duration=audio_duration,
                         subtitle_config=subtitle_config,
                     )
+                except AlignmentQualityError as exc:
+                    _write_json(alignment_diagnostics_path, exc.diagnostics)
+                    raise BuildError(str(exc)) from exc
                 except ValueError as exc:
                     raise BuildError(str(exc)) from exc
             else:
                 raise BuildError("字幕阶段缺少可用的对齐数据。")
             _write_json(transcript_path, transcript)
+            _write_json(alignment_diagnostics_path, transcript["alignment"])
             _write_json(
                 emphasis_path,
                 {
@@ -1980,6 +2035,7 @@ def build_project(
                 captions,
                 captions_ass,
                 transcript_path,
+                alignment_diagnostics_path,
                 emphasis_path,
             ]
             if font:
