@@ -12,11 +12,12 @@ from app.pipeline import (
     parse_edge_metadata,
     parse_srt,
     schedule_shots,
+    whisper_initial_prompt,
     wrap_caption,
     write_ass,
 )
 from app.task_state import TaskState, find_task_dir
-from app.transcript import build_transcript
+from app.transcript import AlignmentQualityError, build_transcript
 
 
 class MotionFilterTests(unittest.TestCase):
@@ -123,6 +124,23 @@ class TranscriptTests(unittest.TestCase):
             ],
         }
 
+    def _recognized_alignment(self, text: str) -> dict:
+        semantic = [char for char in text if char.isalnum() or "\u3400" <= char <= "\u9fff"]
+        return {
+            "engine": "test-whisper",
+            "model": "tiny-test",
+            "device": "cpu",
+            "words": [
+                {
+                    "text": char,
+                    "start": index * 0.11,
+                    "end": (index + 1) * 0.11,
+                    "probability": 0.99,
+                }
+                for index, char in enumerate(semantic)
+            ],
+        }
+
     def test_transcript_reflows_and_highlights_manual_phrase(self) -> None:
         text = "如果来到古罗马，街角的大陶罐其实是让路人撒尿的。更离谱的是它还能赚钱。"
         config = {
@@ -160,6 +178,102 @@ class TranscriptTests(unittest.TestCase):
                     "emphasis": {"mode": "hybrid"},
                 },
             )
+
+    def test_homophone_replacements_are_accepted_and_recorded(self) -> None:
+        text = (
+            "一名19岁的女工，死因是砷中毒。她的工作，竟是给帽子做绿叶。"
+            "这绿鲜艳又便宜。舍勒发明了这种含砷颜料，粉尘侵入肺腑，她们是牺牲品。"
+        )
+        recognized = (
+            "一名19岁的女工死因弑身中毒她的工作竟是给帽子做滤液"
+            "这滤鲜艳又便宜舍勒发明了这种寒深颜料粉尘亲入肺腑他们是牺牲品"
+        )
+        transcript, cues, _ = build_transcript(
+            text,
+            self._recognized_alignment(recognized),
+            audio_duration=12.0,
+            subtitle_config={
+                "minimum_alignment_coverage": 0.98,
+                "maximum_missing_ratio": 0.01,
+                "maximum_unresolved_run_chars": 3,
+                "phonetic_matching": True,
+                "max_phonetic_span_chars": 4,
+                "emphasis": {"mode": "none"},
+            },
+        )
+        alignment = transcript["alignment"]
+        self.assertLess(alignment["exact_coverage"], 0.98)
+        self.assertEqual(alignment["phonetic_coverage"], 1.0)
+        self.assertEqual(alignment["missing_ratio"], 0.0)
+        self.assertEqual(alignment["result"], "passed")
+        accepted = [item for item in alignment["mismatches"] if item["accepted"]]
+        self.assertEqual(len(accepted), 6)
+        self.assertTrue(all(item["classification"] == "phonetic_match" for item in accepted))
+        self.assertEqual("".join(cue.text.replace("\n", "") for cue in cues), text)
+
+    def test_non_homophone_and_numeric_replacements_are_rejected(self) -> None:
+        for script, recognized in (
+            ("绿色颜料很危险", "红色颜料很危险"),
+            ("一名19岁的女工", "一名18岁的女工"),
+            ("她她她她她来到工厂", "他他他他他来到工厂"),
+        ):
+            with self.subTest(script=script), self.assertRaises(AlignmentQualityError) as raised:
+                build_transcript(
+                    script,
+                    self._recognized_alignment(recognized),
+                    audio_duration=3.0,
+                    subtitle_config={
+                        "minimum_alignment_coverage": 0.98,
+                        "phonetic_matching": True,
+                        "max_phonetic_span_chars": 4,
+                        "emphasis": {"mode": "none"},
+                    },
+                )
+            self.assertEqual(raised.exception.diagnostics["result"], "failed")
+
+    def test_long_missing_and_unexpected_phrases_are_rejected(self) -> None:
+        cases = (
+            ("古罗马人使用绿色颜料", "古罗马人使用"),
+            ("古罗马人使用绿色颜料", "古罗马人真的很危险使用绿色颜料"),
+        )
+        for script, recognized in cases:
+            with self.subTest(recognized=recognized), self.assertRaises(AlignmentQualityError):
+                build_transcript(
+                    script,
+                    self._recognized_alignment(recognized),
+                    audio_duration=3.0,
+                    subtitle_config={
+                        "minimum_alignment_coverage": 0.98,
+                        "maximum_missing_ratio": 0.01,
+                        "maximum_unresolved_run_chars": 3,
+                        "emphasis": {"mode": "none"},
+                    },
+                )
+
+    def test_empty_whisper_result_returns_writable_diagnostics(self) -> None:
+        with self.assertRaises(AlignmentQualityError) as raised:
+            build_transcript(
+                "古罗马人使用大陶罐",
+                {"words": []},
+                audio_duration=2.0,
+                subtitle_config={
+                    "minimum_alignment_coverage": 0.98,
+                    "emphasis": {"mode": "none"},
+                },
+            )
+        diagnostics = raised.exception.diagnostics
+        self.assertEqual(diagnostics["result"], "failed")
+        self.assertEqual(diagnostics["missing_ratio"], 1.0)
+        self.assertEqual(diagnostics["mismatches"][0]["classification"], "missing")
+
+    def test_whisper_prompt_only_contains_terms_present_in_script(self) -> None:
+        prompt = whisper_initial_prompt(
+            "瑞典化学家舍勒发明了含砷颜料。",
+            {"pronunciation": {"舍勒": "Shè lè", "玛蒂尔达": "Mǎ dì ěr dá"}},
+            {"emphasis": {"proper_nouns": ["含砷颜料", "古罗马"]}},
+        )
+        self.assertEqual(prompt, "舍勒、含砷颜料")
+        self.assertNotIn("瑞典化学家", prompt)
 
     def test_chinese_words_do_not_create_short_single_character_tails(self) -> None:
         text = "于是对公共厕所收集的尿液征税。他就拿起一枚金币放到儿子鼻子前，问：有味道吗？"

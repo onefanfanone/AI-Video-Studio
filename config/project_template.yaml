@@ -31,6 +31,10 @@ subtitles:
   whisper_device: cuda
   whisper_compute_type: float16
   minimum_alignment_coverage: 0.98
+  phonetic_matching: true
+  max_phonetic_span_chars: 4
+  maximum_missing_ratio: 0.01
+  maximum_unresolved_run_chars: 3
   style_preset: social_pink
   font_auto_download: false
   font_fallback: Microsoft YaHei

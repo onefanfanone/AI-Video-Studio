@@ -58,6 +58,7 @@ def _align(request: dict[str, Any]) -> dict[str, Any]:
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
         condition_on_previous_text=False,
+        initial_prompt=str(request.get("initial_prompt") or "") or None,
     )
     words: list[dict[str, Any]] = []
     segment_count = 0

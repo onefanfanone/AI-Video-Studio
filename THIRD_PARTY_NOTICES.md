@@ -28,6 +28,15 @@ FFmpeg 作为独立可执行组件分发。发行包必须附 GPL 许可证、�
 
 源码和隔离 Python 环境保存在工作区 `runtime/`。公开源码仓库和默认轻量发行包不包含该运行时。
 
+## pypinyin
+
+- Version: 0.55.0
+- Source: https://github.com/mozillazg/python-pinyin
+- Package: https://pypi.org/project/pypinyin/0.55.0/
+- License: MIT
+
+主环境使用 pypinyin 对不超过四个汉字的 Whisper 同音替换做无声调拼音校验。对应 wheel 包随离线 wheelhouse 分发，许可证不因本项目的 MIT License 而改变。
+
 ## ComfyUI
 
 - Source: https://github.com/comfyanonymous/ComfyUI
