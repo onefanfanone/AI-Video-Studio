@@ -155,24 +155,51 @@ def add_ai_fallbacks(
     if not config.get("enabled", True):
         return candidates, []
     ai_only = str(candidates.get("visual_strategy", "")) == "ai_only"
-    if not ai_only and not candidates.get("at_least_one_source_succeeded"):
+    provider = str(config.get("provider", "openai")).lower()
+    if provider not in {"openai", "comfyui_local"}:
+        raise VisualSupplyError(
+            f"不支持的 AI 生图 provider：{provider}。可用值为 comfyui_local 或 openai。"
+        )
+    candidate_policy = str(config.get("candidate_policy", "gaps")).strip().lower()
+    # ``all_shots`` is an explicit instruction to create a local candidate for
+    # every shot, independent of whether museum search found anything. It is
+    # therefore safe to continue through a museum outage: no paid call is
+    # inferred from a failed search. Gap-based fallback and external providers
+    # remain fail-closed so that an outage can never be mistaken for "no result".
+    local_all_shots = provider == "comfyui_local" and candidate_policy == "all_shots"
+    if (
+        not ai_only
+        and not candidates.get("at_least_one_source_succeeded")
+        and not local_all_shots
+    ):
         raise VisualSupplyError(
             "所有馆藏源均未成功完成搜索。为避免把服务故障误判为缺图，本次不会触发 AI 生图。"
         )
+    targets = select_ai_candidate_targets(candidates, candidate_policy)
     gaps = [shot for shot in candidates.get("shots", []) if not shot.get("recommended_asset_id")]
     unavailable = [
         shot for shot in gaps if not shot.get("museum_source_succeeded", True)
     ]
-    if unavailable and not ai_only:
+    if unavailable and not ai_only and not local_all_shots:
         shot_numbers = ", ".join(str(item.get("shot_id")) for item in unavailable)
         raise VisualSupplyError(
             f"镜头 {shot_numbers} 没有任何馆藏 provider 成功完成搜索；"
             "这属于服务故障而非零结果，本次不会触发 AI 生图。"
         )
-    provider = str(config.get("provider", "openai")).lower()
-    if provider not in {"openai", "comfyui_local"}:
-        raise VisualSupplyError(
-            f"不支持的 AI 生图 provider：{provider}。可用值为 comfyui_local 或 openai。"
+    if unavailable and local_all_shots:
+        outage_shots = [int(item["shot_id"]) for item in unavailable]
+        candidates["museum_outage_ai_override"] = {
+            "policy": "local_comfyui_all_shots",
+            "shot_ids": outage_shots,
+            "reason": (
+                "馆藏搜索服务故障；按用户明确选择的本机 ComfyUI 全镜头候选策略继续，"
+                "未把故障解释为馆藏零结果。"
+            ),
+        }
+        shot_numbers = ", ".join(str(item) for item in outage_shots)
+        print(
+            f"      [提示] 镜头 {shot_numbers} 的馆藏搜索服务异常；"
+            "按“本机 ComfyUI＋所有镜头”策略继续生成 AI 候选，故障状态将保留供审核。"
         )
     env = (
         credentials
@@ -181,7 +208,6 @@ def add_ai_fallbacks(
     )
     project_dir = (project_dir or Path.cwd()).resolve()
     maximum = resolve_ai_image_limit(config, provider, len(candidates.get("shots", [])))
-    targets = select_ai_candidate_targets(candidates, str(config.get("candidate_policy", "gaps")))
     candidates_per_shot = int(config.get("candidates_per_shot", 1))
     if candidates_per_shot < 1 or candidates_per_shot > 8:
         raise VisualSupplyError("candidates_per_shot 必须在 1–8 之间。")

@@ -669,6 +669,149 @@ class ReviewAndFallbackTests(unittest.TestCase):
                 Path(temporary) / "provenance",
             )
 
+    def test_local_all_shots_can_continue_through_partial_museum_outage(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (768, 1344), (50, 70, 90)).save(stream, format="JPEG")
+        candidates = {
+            "at_least_one_source_succeeded": True,
+            "shots": [
+                {
+                    "shot_id": 16,
+                    "recommended_asset_id": None,
+                    "museum_source_succeeded": False,
+                    "successful_providers": [],
+                    "candidates": [],
+                }
+            ],
+        }
+        scene_plan = {
+            "shots": [
+                {
+                    "shot_id": 16,
+                    "ai_prompt": "A historically accurate workshop interior.",
+                    "must_include": ["stone basin"],
+                    "avoid": ["modern machinery"],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "app.visual_supply.workflow_fingerprint", return_value="workflow-sha"
+        ), patch(
+            "app.visual_supply.generate_comfyui_image",
+            return_value=(stream.getvalue(), {"request_id": "local-test", "model": "test"}),
+        ):
+            updated, _ = add_ai_fallbacks(
+                candidates,
+                scene_plan,
+                {
+                    "enabled": True,
+                    "provider": "comfyui_local",
+                    "candidate_policy": "all_shots",
+                    "candidates_per_shot": 1,
+                    "max_images_per_run": "all_candidates",
+                    "regeneration_headroom": 0,
+                    "model_license_url": "https://example.test/license",
+                },
+                {},
+                Path(temporary) / "cache",
+                Path(temporary) / "provenance",
+                Path(temporary),
+            )
+        self.assertEqual(updated["ai_generated_count"], 1)
+        self.assertTrue(updated["shots"][0]["recommended_asset_id"].startswith("comfyui-"))
+        self.assertEqual(
+            updated["museum_outage_ai_override"]["shot_ids"],
+            [16],
+        )
+
+    def test_local_all_shots_can_continue_when_every_museum_source_is_down(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (768, 1344), (50, 70, 90)).save(stream, format="JPEG")
+        candidates = {
+            "at_least_one_source_succeeded": False,
+            "shots": [
+                {
+                    "shot_id": 1,
+                    "recommended_asset_id": None,
+                    "museum_source_succeeded": False,
+                    "successful_providers": [],
+                    "candidates": [],
+                }
+            ],
+        }
+        scene_plan = {
+            "shots": [
+                {"shot_id": 1, "ai_prompt": "Historical scene.", "must_include": [], "avoid": []}
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "app.visual_supply.workflow_fingerprint", return_value="workflow-sha"
+        ), patch(
+            "app.visual_supply.generate_comfyui_image",
+            return_value=(stream.getvalue(), {"request_id": "local-test", "model": "test"}),
+        ):
+            updated, _ = add_ai_fallbacks(
+                candidates,
+                scene_plan,
+                {
+                    "enabled": True,
+                    "provider": "comfyui_local",
+                    "candidate_policy": "all_shots",
+                    "candidates_per_shot": 1,
+                    "max_images_per_run": "all_candidates",
+                    "regeneration_headroom": 0,
+                    "model_license_url": "https://example.test/license",
+                },
+                {},
+                Path(temporary) / "cache",
+                Path(temporary) / "provenance",
+                Path(temporary),
+            )
+        self.assertEqual(updated["ai_generated_count"], 1)
+        self.assertEqual(updated["museum_outage_ai_override"]["shot_ids"], [1])
+
+    def test_museum_outage_still_blocks_local_gap_and_external_all_shots(self):
+        candidates = {
+            "at_least_one_source_succeeded": True,
+            "shots": [
+                {
+                    "shot_id": 1,
+                    "recommended_asset_id": None,
+                    "museum_source_succeeded": False,
+                    "candidates": [],
+                }
+            ],
+        }
+        scene_plan = {
+            "shots": [
+                {"shot_id": 1, "ai_prompt": "Historical scene.", "must_include": [], "avoid": []}
+            ]
+        }
+        for config in (
+            {
+                "enabled": True,
+                "provider": "comfyui_local",
+                "candidate_policy": "gaps",
+                "max_images_per_run": 4,
+            },
+            {
+                "enabled": True,
+                "provider": "openai",
+                "candidate_policy": "all_shots",
+                "max_images_per_run": 4,
+            },
+        ):
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaises(VisualSupplyError):
+                    add_ai_fallbacks(
+                        candidates,
+                        scene_plan,
+                        config,
+                        {},
+                        Path(temporary) / "cache",
+                        Path(temporary) / "provenance",
+                    )
+
 
 class LedgerAndStoryboardTests(unittest.TestCase):
     def test_manifest_reuse_rejects_truncated_image(self):

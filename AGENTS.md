@@ -95,7 +95,7 @@ scene-plan-v3 的 `time_context`、`must_include`、`avoid` 和搜索词都由�
 - Wikimedia Commons：必须同时有作者、来源页和可归一化为 CC0 1.0/PDM 1.0 的授权。
 - Openverse：只作发现，未经已实现上游 provider 再核验时不可选择。
 
-CC BY、CC BY-SA、NC、ND、授权不明、来源不全、HTTP 原图、尺寸不足或文件解码不完整都是不可覆盖的硬拒绝。搜索服务故障必须与零结果分开记录，不能因为 provider 故障直接触发 AI 生图。
+CC BY、CC BY-SA、NC、ND、授权不明、来源不全、HTTP 原图、尺寸不足或文件解码不完整都是不可覆盖的硬拒绝。搜索服务故障必须与零结果分开记录，不能因为 provider 故障直接触发缺图式或外部付费 AI 生图。唯一例外是用户已明确选择 `comfyui_local + candidate_policy: all_shots`：这项本机全镜头策略本来就独立于馆藏结果，可以继续，但必须把故障镜头和放行原因写入候选审计数据。
 
 DeepSeek 候选复核只读取必要文字元数据，拍摄/数字化年份不能单独成为拒绝理由。语义拒绝允许用户确认风险后覆盖，授权拒绝永远不可覆盖。
 
