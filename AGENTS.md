@@ -4,7 +4,7 @@
 
 ## 1. 目标与边界
 
-本项目是 Windows 本地“奇怪世界历史趣闻”短视频粗剪流水线。当前能力包括脚本工作台、MoneyPrinterTurbo/Edge TTS 旁白、faster-whisper 逐词对齐、ASS/剪映富文本字幕、DeepSeek 镜头规划、馆藏检索、ComfyUI AI 候选、人工素材审核、授权台账、竖屏 MP4 和剪映 9.9 草稿。
+本项目是 Windows 本地“奇怪世界历史趣闻”短视频粗剪流水线。当前能力包括脚本工作台、脚本派生与画面增量复用、MoneyPrinterTurbo/Edge TTS 旁白、faster-whisper 逐词对齐、ASS/剪映富文本字幕、DeepSeek 镜头规划、馆藏检索、ComfyUI AI 候选、人工素材审核、授权台账、竖屏 MP4 和剪映 9.9 草稿。
 
 明确不包含：史实检索与引用核验、自动发布、平台上传、背景音乐、新版剪映自动点击导出。DeepSeek 不是史实来源，授权台账也不等于事实核查；`publish_ready` 必须保持 `false`。
 
@@ -16,7 +16,8 @@
 
 ```text
 app/__main__.py             CLI 和退出码
-app/pipeline.py             16 阶段编排、渲染、草稿和验收
+app/pipeline.py             普通 16 / 派生 18 阶段编排、渲染、草稿和验收
+app/asset_reuse.py          父任务校验、复用快照、匹配和本机审核页
 app/script_workbench.py     direct/review/topic、版本、锁稿和本机页面
 app/studio_console.py       首次向导、首页、四步配置与配置档 UI
 app/studio_settings.py      settings、工作区路径和 Windows DPAPI 密钥
@@ -69,6 +70,14 @@ preflight → voice → alignment → captions → visual_plan → asset_search
 → license_audit → storyboard → clips → preview → draft → validation
 ```
 
+派生项目在 `visual_plan` 后插入 `asset_reuse_match` 和 `asset_reuse_review`。`task.json.stage_order` 是可选的动态阶段顺序；旧 schema v1 任务缺少该字段时必须继续按原 16 阶段读取。普通任务不得被无条件迁移为 18 阶段。
+
+派生项目必须满足：父任务成功、`visual_mode=sourced`、项目和授权台账完整。锁稿时生成不可变 `reuse_source_snapshot.json`，并把父任务 ID、父脚本哈希、快照哈希和策略加入项目快照及构建输入哈希。任务路径必须以安全 basename 在工作区 outputs 下解析，禁止接收任意文件路径。
+
+复用池范围固定为父成片已选素材与未选 AI 候选；未选馆藏候选不得进入。DeepSeek 不可用时只允许精确旁白匹配自动预选，模糊候选必须人工选择。同一旧素材默认最多匹配一个新镜头，人工重复使用要记录 `duplicate_override`。复用审核是独立 `waiting_for_review` 阶段，续跑不得重复配音、Whisper、视觉计划或已缓存的匹配调用。
+
+复用完成后，馆藏搜索、候选语义复核和生图只能读取未匹配镜头子集；全部匹配时不得触发这些网络或 ComfyUI 调用。复用 AI 图必须校验原缓存 SHA 后本地复制；复用馆藏图必须重新核验 provider 来源和许可证，授权不变时从 `.cache/assets` 复制，变化或来源消失时失败关闭。新 manifest、licenses、credits、storyboard 和报告必须关联新旁白/新 shot，并记录 `reused_from`、评分、理由和覆盖行为。
+
 每个阶段开始、成功、等待或失败都必须原子更新 `task.json`。`asset_review: waiting_for_review` 是正常暂停。续跑只能复用满足以下全部条件的阶段：
 
 - 项目、构建选项和完整输入哈希一致。
@@ -81,6 +90,8 @@ preflight → voice → alignment → captions → visual_plan → asset_search
 `storyboard.json` 使用 schema v2。画面供应模块必须通过 storyboard 接回渲染器，不得绕过预渲染、草稿或验收层。每个 shot 保留时长、整数帧、本地源文件、裁切/运动、字幕、intent/asset/provenance、rights、AI 标识、审核和语义复核字段。
 
 预渲染镜头不能随意移除：MP4 和剪映必须复用同一批统一分辨率、帧率和时长的镜头文件。镜头时长先换算为整数帧再计算时间；30fps 下总画面与旁白误差应接近一帧且不超过 0.2 秒。
+
+跨任务镜头缓存键必须至少包含素材 SHA、种类、源起点、整数帧、时长、裁切、焦点、运动、画布和渲染版本。命中后仍需 probe 分辨率与时长；任一参数变化都必须重渲染。
 
 ## 5. 视觉 provider 与授权边界
 

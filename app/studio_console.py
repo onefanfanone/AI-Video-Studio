@@ -20,6 +20,7 @@ from .script_workbench import (
     ScriptWorkbenchError,
     _latest_video_task,
     create_draft,
+    create_revision_draft,
     discard_draft,
     latest_editing_draft,
     load_draft,
@@ -32,6 +33,7 @@ from .script_workbench import (
     voice_preview_files,
     configure_workbench_paths,
 )
+from .asset_reuse import list_reusable_tasks
 from .studio_environment import (
     APP_VERSION,
     check_release_once,
@@ -189,6 +191,22 @@ def _home_page(csrf: str, paths: Any, settings: Mapping[str, Any], message: str 
     return _layout("home", "首页", body, paths)
 
 
+def _tasks_page(csrf: str, paths: Any, message: str = "") -> str:
+    tasks = list_reusable_tasks(paths.output_root, paths.project_root)
+    cards = "".join(
+        f'''<div class="plain-row"><div><b>{_escape(item['title'])}</b>
+        <span class="meta">{_escape(item['task_id'])}</span></div>
+        <span class="state ok">已完成</span>
+        <span class="meta">{item['asset_count']} 张已选画面 · {item['ai_count']} 张 AI</span>
+        <button class="button secondary" name="parent_task_id" value="{_escape(item['task_id'])}">修改脚本并复用画面</button></div>'''
+        for item in tasks
+    ) or '<div class="empty">暂时没有台账完整的 sourced 成片可供派生。</div>'
+    body = f'''{_notice(message, "error" if message else "")}<div class="title-row"><div><h1>任务</h1>
+    <p class="lead">从成功成片建立独立修订项目；父项目、父成片和版权台账保持只读。</p></div></div>
+    <form method="post" action="/tasks/action">{_csrf(csrf)}<section class="section"><div class="section-head"><h2>可复用的历史成片</h2></div><div class="plain-list">{cards}</div></section></form>'''
+    return _layout("tasks", "任务", body, paths)
+
+
 def _wizard_chrome(step: int, body: str, csrf: str, data: Mapping[str, Any], message: str = "") -> str:
     labels = ("脚本", "AI 与画面", "声音与字幕", "输出与汇总")
     steps = "".join(
@@ -198,7 +216,12 @@ def _wizard_chrome(step: int, body: str, csrf: str, data: Mapping[str, Any], mes
     back = '<a class="button secondary" href="/">退出</a>' if step == 1 else f'<button type="button" class="button secondary" data-submit="back">上一步</button>'
     next_action = "lock" if step == 4 else "next"
     next_label = "锁定脚本并开始制作" if step == 4 else "下一步"
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>新建视频 · AI-Video Studio</title><link rel="stylesheet" href="/assets/studio.css"></head><body class="wizard-shell"><div class="wizard"><header class="wizard-top"><div class="wizard-brand">AI-Video Studio</div><div class="wizard-steps">{steps}</div><a class="button ghost" href="/">保存并退出</a></header><form id="wizard-form" method="post" action="/wizard/action"><input type="hidden" id="form-action" name="action" value="next">{_csrf(csrf)}<input type="hidden" name="step" value="{step}"><div class="wizard-body"><div class="wizard-panel">{_notice(message, "error" if message else "")}{body}</div></div><footer class="wizard-footer">{back}<button type="button" class="button primary" data-submit="{next_action}">{next_label}</button></footer></form></div><script src="/assets/studio.js" defer></script></body></html>'''
+    revision_notice = ""
+    if isinstance(data.get("revision"), Mapping):
+        revision_notice = _notice(
+            f"这是从任务 {data['revision'].get('parent_task_id')} 派生的修订版。锁稿后会先审核旧画面匹配，只为空缺镜头补图。"
+        )
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>新建视频 · AI-Video Studio</title><link rel="stylesheet" href="/assets/studio.css"></head><body class="wizard-shell"><div class="wizard"><header class="wizard-top"><div class="wizard-brand">AI-Video Studio</div><div class="wizard-steps">{steps}</div><a class="button ghost" href="/">保存并退出</a></header><form id="wizard-form" method="post" action="/wizard/action"><input type="hidden" id="form-action" name="action" value="next">{_csrf(csrf)}<input type="hidden" name="step" value="{step}"><div class="wizard-body"><div class="wizard-panel">{revision_notice}{_notice(message, "error" if message else "")}{body}</div></div><footer class="wizard-footer">{back}<button type="button" class="button primary" data-submit="{next_action}">{next_label}</button></footer></form></div><script src="/assets/studio.js" defer></script></body></html>'''
 
 
 def _options(catalog: Mapping[str, Mapping[str, Any]], selected: str, *, settings_data: bool = False, previews: Mapping[str, Path] | None = None) -> str:
@@ -417,7 +440,7 @@ def run_studio_console(
             if parsed.path == "/environment": self._send(200,_environment_page(paths)); return
             if parsed.path == "/profiles": self._send(200,_profiles_page(csrf,paths,query,messages.pop("profiles",""))); return
             if parsed.path == "/settings": self._send(200,_settings_page(csrf,paths,settings,secret_store.status(),messages.pop("settings",""))); return
-            if parsed.path == "/tasks": self._send(200,_layout("tasks","任务",'<div class="title-row"><div><h1>任务</h1><p class="lead">首页会优先显示最近一个失败或等待审核的任务。</p></div></div>',paths)); return
+            if parsed.path == "/tasks": self._send(200,_tasks_page(csrf,paths,messages.pop("tasks",""))); return
             self._send(404,"not found","text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
@@ -449,6 +472,11 @@ def run_studio_console(
                     action = values.get("action",[""])[0]
                     if action == "resume_draft": current = latest_editing_draft() or create_draft(); self.send_response(303); self.send_header("Location","/wizard?step=1"); self.end_headers(); return
                     if action == "resume_video": result["status"]="resume_video"; result["resume_task"]=_latest_video_task(); self._send(200,"<meta charset=utf-8><h2>正在安全续跑任务，可关闭页面。</h2>"); self._shutdown(); return
+                if parsed.path == "/tasks/action":
+                    values = self._values()
+                    if values is None: return
+                    current = create_revision_draft(values.get("parent_task_id", [""])[0])
+                    self.send_response(303); self.send_header("Location", "/wizard?step=1"); self.end_headers(); return
                 if parsed.path == "/wizard/action":
                     values = self._values()
                     if values is None: return
@@ -555,7 +583,7 @@ def run_studio_console(
                     self.send_response(303);self.send_header("Location","/settings");self.end_headers();return
                 self._send(404,"not found","text/plain")
             except (StudioConsoleError,StudioSettingsError,ProfileError,ProviderTestError,ScriptWorkbenchError,ValueError,OSError) as exc:
-                target="wizard" if parsed.path.startswith("/wizard") else "profiles" if parsed.path.startswith("/profiles") else "settings" if parsed.path.startswith("/settings") else "setup"
+                target="wizard" if parsed.path.startswith("/wizard") else "profiles" if parsed.path.startswith("/profiles") else "settings" if parsed.path.startswith("/settings") else "tasks" if parsed.path.startswith("/tasks") else "setup"
                 messages[target]=str(exc)
                 location=f"/wizard?step={values.get('step',['1'])[0]}" if target=="wizard" and 'values' in locals() and values else f"/{target}" if target!="profiles" else f"/profiles?kind={values.get('kind',['llm'])[0]}"
                 self.send_response(303);self.send_header("Location",location);self.end_headers()

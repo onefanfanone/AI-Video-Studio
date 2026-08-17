@@ -81,6 +81,16 @@ task:
 visuals:
   mode: sourced
   strategy: museum_and_ai
+  reuse:
+    enabled: false
+    scope: selected_and_ai
+    generate_for_reused: false
+    max_uses_per_asset: 1
+    allow_manual_duplicate: true
+    recommendation_threshold: 75
+    alternative_threshold: 55
+    shots_per_batch: 4
+    require_review: true
   planner:
     provider: deepseek
     base_url: https://api.deepseek.com

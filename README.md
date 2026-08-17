@@ -1,6 +1,6 @@
 # AI-Video Studio
 
-AI-Video Studio 是一个面向 Windows 小白用户的本机历史短视频粗剪工具。双击 `run.bat` 后，可在浏览器控制台完成脚本、文本模型、画面来源、ComfyUI 工作流、Edge 音色、字幕样式和剪映输出配置；锁稿后再进入现有 16 阶段流水线。
+AI-Video Studio 是一个面向 Windows 小白用户的本机历史短视频粗剪工具。双击 `run.bat` 后，可在浏览器控制台完成脚本、文本模型、画面来源、ComfyUI 工作流、Edge 音色、字幕样式和剪映输出配置；普通项目进入 16 阶段流水线，修改旧成片的派生项目进入 18 阶段增量复用流水线。
 
 程序不会自动发布视频。所有任务的 `publish_ready` 都保持 `false`，历史事实、素材授权和平台 AI 标识仍需人工终审。
 
@@ -68,6 +68,27 @@ preflight → voice → alignment → captions → visual_plan → asset_search
 
 `asset_review: waiting_for_review` 是正常暂停。每个镜头选择画面后才会下载第三方原图。剪映运行时会停在 `draft`；关闭剪映后从控制台继续即可。
 
+### 修改脚本并复用旧画面
+
+在控制台“任务”页，成功完成且授权台账完整的 sourced 成片会显示“修改脚本并复用画面”。点击后会建立新的脚本草稿，并继承父项目的脚本、时长、声音、字幕、文本模型、生图工作流和输出设置；锁稿后创建新的独立项目，父项目、父输出和父台账不会被覆盖。
+
+派生项目会在 `visual_plan` 后增加两个阶段：
+
+```text
+asset_reuse_match → asset_reuse_review
+```
+
+复用池只包含父成片已选素材和父任务未选 AI 候选，不包含未选馆藏候选。逐字未变的旁白会优先精确匹配；其他候选结合文字相似度、动态时代约束、必需/禁用元素、旧镜头顺序和 DeepSeek 文字复核评分。每个镜头必须明确选择“复用旧图”或“补充新图”。同一旧图默认只能使用一次，人工重复使用必须单独确认并写入台账。
+
+只有“补充新图”的镜头会进入馆藏搜索、候选语义复核和 ComfyUI。若全部镜头复用成功，这三类调用为零。复用 AI 图直接读取已校验缓存；复用馆藏图仍会重新核验来源与许可证，但授权未变时不会重复下载。派生任务新增：
+
+- `reuse_source_snapshot.json`：锁稿时固化的父素材、旧意图、哈希和缓存定位。
+- `asset_reuse_plan.json`：本地与 DeepSeek 匹配分数、理由和冲突。
+- `asset_reuse_selection.json`：人工选择及重复使用确认。
+- `reuse_report.json`：复用、新增和重复覆盖数量。
+
+镜头渲染也使用内容寻址缓存；只有素材 SHA、帧数、运动、裁切和画布参数全部一致时才复用旧片段。脚本改变仍会重新配音、Whisper 对齐、字幕和镜头计划。
+
 续跑同时校验项目、脚本、构建选项、`profile_snapshot.json` 和产物完整性。只有哈希一致且产物有效的成功阶段会复用；配置改变时会安全创建新任务，不会从错误阶段继续。
 
 底层命令仍可用于维护旧项目：
@@ -97,7 +118,7 @@ Whisper 对齐保留 98% 的有效覆盖率门槛。程序先按锁定原稿做�
 
 ## 输出与剪映
 
-每次运行写入 `<工作区>/outputs/<project>-<run-id>`，包括 MP4、旁白、transcript、`alignment_diagnostics.json`、SRT/ASS、视觉计划、候选与选择、授权台账、storyboard v2、task、validation 和构建报告。
+每次运行写入 `<工作区>/outputs/<project>-<run-id>`，包括 MP4、旁白、transcript、`alignment_diagnostics.json`、SRT/ASS、视觉计划、候选与选择、授权台账、storyboard v2、task、validation 和构建报告。派生项目还包含画面复用计划、人工复用选择和复用报告。
 
 剪映草稿默认发现：
 

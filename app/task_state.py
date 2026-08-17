@@ -26,6 +26,39 @@ TASK_STAGES = (
     "validation",
 )
 
+REUSE_TASK_STAGES = (
+    "preflight",
+    "voice",
+    "alignment",
+    "captions",
+    "visual_plan",
+    "asset_reuse_match",
+    "asset_reuse_review",
+    "asset_search",
+    "asset_semantic_review",
+    "ai_fallback",
+    "asset_review",
+    "asset_download",
+    "license_audit",
+    "storyboard",
+    "clips",
+    "preview",
+    "draft",
+    "validation",
+)
+
+
+def _stage_record() -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "attempts": 0,
+        "input_hash": None,
+        "started_at": None,
+        "finished_at": None,
+        "artifacts": [],
+        "error": None,
+    }
+
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat()
@@ -57,8 +90,12 @@ class TaskState:
         project_id: str,
         input_hash: str,
         options: dict[str, Any] | None = None,
+        stage_order: Iterable[str] | None = None,
     ) -> "TaskState":
         now = _now()
+        ordered_stages = tuple(stage_order or TASK_STAGES)
+        if not ordered_stages or len(set(ordered_stages)) != len(ordered_stages):
+            raise ValueError("任务阶段顺序为空或包含重复阶段。")
         task = cls(
             path,
             {
@@ -68,23 +105,13 @@ class TaskState:
                 "project_id": project_id,
                 "input_hash": input_hash,
                 "options": options or {},
+                "stage_order": list(ordered_stages),
                 "status": "running",
                 "current_stage": "preflight",
                 "created_at": now,
                 "updated_at": now,
                 "error": None,
-                "stages": {
-                    name: {
-                        "status": "pending",
-                        "attempts": 0,
-                        "input_hash": None,
-                        "started_at": None,
-                        "finished_at": None,
-                        "artifacts": [],
-                        "error": None,
-                    }
-                    for name in TASK_STAGES
-                },
+                "stages": {name: _stage_record() for name in ordered_stages},
             },
         )
         task.save()
@@ -95,22 +122,20 @@ class TaskState:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema_version") != 1:
             raise ValueError(f"不支持的 task.json 版本：{path}")
-        # Earlier tasks remain readable after the stage-four expansion.
-        # Missing records are added lazily so an old local task can still resume.
-        for name in TASK_STAGES:
-            data.setdefault("stages", {}).setdefault(
-                name,
-                {
-                    "status": "pending",
-                    "attempts": 0,
-                    "input_hash": None,
-                    "started_at": None,
-                    "finished_at": None,
-                    "artifacts": [],
-                    "error": None,
-                },
-            )
+        # Earlier tasks did not persist stage_order. They remain 16-stage tasks;
+        # derived projects explicitly opt into the 18-stage order.
+        order = data.get("stage_order")
+        if not isinstance(order, list) or not order:
+            order = list(TASK_STAGES)
+            data["stage_order"] = order
+        for name in order:
+            data.setdefault("stages", {}).setdefault(str(name), _stage_record())
         return cls(path, data)
+
+    @property
+    def stage_order(self) -> tuple[str, ...]:
+        order = self.data.get("stage_order")
+        return tuple(str(name) for name in order) if isinstance(order, list) else TASK_STAGES
 
     def save(self) -> None:
         self.data["updated_at"] = _now()
@@ -187,10 +212,10 @@ class TaskState:
     def invalidate_after(self, stage: str) -> None:
         """Mark downstream stages pending when an upstream artifact is repaired."""
         try:
-            start = TASK_STAGES.index(stage) + 1
+            start = self.stage_order.index(stage) + 1
         except ValueError as exc:
             raise ValueError(f"未知任务阶段：{stage}") from exc
-        for name in TASK_STAGES[start:]:
+        for name in self.stage_order[start:]:
             record = self.data["stages"][name]
             record.update(
                 {

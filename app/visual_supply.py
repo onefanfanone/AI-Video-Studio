@@ -658,6 +658,14 @@ def download_selected_assets(
             "ai_size": generation.get("size", ""),
             "ai_quality": generation.get("quality", ""),
             "ai_generated_at": generation.get("generated_at", ""),
+            "reused": bool(original.get("reused")),
+            "reused_from": original.get("reused_from"),
+            "reuse_score": original.get("reuse_score"),
+            "reuse_reason": original.get("reuse_reason", ""),
+            "duplicate_override": bool(
+                selected.get("duplicate_override")
+                or original.get("duplicate_override")
+            ),
         }
 
     def existing_entry(
@@ -720,7 +728,20 @@ def download_selected_assets(
             candidate = _refetch_candidate(original, env)
         except (AssetSourceError, VisualSupplyError) as exc:
             raise VisualSupplyError(str(exc)) from exc
-        if original.get("ai_generated"):
+        if original.get("reused"):
+            preview = Path(str(original.get("local_preview") or ""))
+            if not preview.is_file():
+                raise VisualSupplyError(
+                    f"复用素材 {original.get('asset_id')} 的内容缓存已丢失。"
+                )
+            data = preview.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != str(original.get("reuse_sha256") or ""):
+                raise VisualSupplyError(
+                    f"复用素材 {original.get('asset_id')} 的缓存哈希已变化。"
+                )
+            mime = str(original.get("mime") or candidate.get("mime") or "image/jpeg")
+        elif original.get("ai_generated"):
             data = Path(original["local_preview"]).read_bytes()
             mime = "image/jpeg"
             candidate = original
@@ -827,11 +848,22 @@ def write_license_outputs(manifest: dict[str, Any], run_dir: Path) -> tuple[Path
         "reviewed_at", "narration", "sha256", "ai_generated",
         "semantic_status", "semantic_score", "semantic_reason", "semantic_override",
         "ai_model", "ai_request_id", "ai_prompt", "ai_size", "ai_quality", "ai_generated_at",
+        "reused", "reused_from", "reuse_score", "reuse_reason", "duplicate_override",
     ]
     with csv_path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(assets)
+        writer.writerows(
+            {
+                **item,
+                "reused_from": json.dumps(
+                    item.get("reused_from"), ensure_ascii=False, sort_keys=True
+                )
+                if item.get("reused_from")
+                else "",
+            }
+            for item in assets
+        )
     credits = run_dir / "CREDITS.md"
     credit_lines = ["# 素材来源与授权", ""]
     for item in assets:
@@ -841,6 +873,15 @@ def write_license_outputs(manifest: dict[str, Any], run_dir: Path) -> tuple[Path
                 f"- 作者：{item['creator']}", f"- 机构：{item['institution']}",
                 f"- 权利标识：{item['rights_code']}",
                 f"- [来源页]({item['source_page']})", f"- SHA-256：`{item['sha256']}`", "",
+                *(
+                    [
+                        f"- 复用自父任务：{(item.get('reused_from') or {}).get('parent_task_id')}",
+                        f"- 复用评分：{item.get('reuse_score')} · {item.get('reuse_reason', '')}",
+                        "",
+                    ]
+                    if item.get("reused")
+                    else []
+                ),
             ]
         )
     credits.write_text("\n".join(credit_lines), encoding="utf-8")
@@ -862,6 +903,11 @@ def write_license_outputs(manifest: dict[str, Any], run_dir: Path) -> tuple[Path
         ),
         "semantic_override_count": sum(
             1 for item in assets if item.get("semantic_override")
+        ),
+        "reused_asset_count": sum(1 for item in assets if item.get("reused")),
+        "new_asset_count": sum(1 for item in assets if not item.get("reused")),
+        "duplicate_override_count": sum(
+            1 for item in assets if item.get("duplicate_override")
         ),
     }
     _atomic_json(run_dir / "license_audit.json", audit)
@@ -909,6 +955,11 @@ def build_sourced_storyboard(
                 "semantic_score": asset.get("semantic_score"),
                 "semantic_reason": asset.get("semantic_reason", ""),
                 "semantic_override": bool(asset.get("semantic_override")),
+                "reused": bool(asset.get("reused")),
+                "reused_from": asset.get("reused_from"),
+                "reuse_score": asset.get("reuse_score"),
+                "reuse_reason": asset.get("reuse_reason", ""),
+                "duplicate_override": bool(asset.get("duplicate_override")),
             }
         )
     return {

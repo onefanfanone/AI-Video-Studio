@@ -265,6 +265,98 @@ class ScriptWorkbenchTests(unittest.TestCase):
         self.assertNotIn("API_KEY", json.dumps(manifest))
         self.assertTrue((first_dir / "script_history" / "final-edit.json").is_file())
 
+    def test_revision_draft_inherits_parent_and_locks_separate_project(self) -> None:
+        parent_id = "history-parent"
+        task_id = "history-parent-run"
+        parent = self.root / "projects" / parent_id
+        parent.mkdir()
+        parent_config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        parent_config["project"]["id"] = parent_id
+        parent_config["project"]["title"] = "父成片"
+        (parent / "project.yaml").write_text(
+            yaml.safe_dump(parent_config, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        original = "父项目的完整脚本。"
+        (parent / "script.txt").write_text(original, encoding="utf-8")
+        profiles = {
+            name: {"id": profile_id}
+            for name, profile_id in {
+                "default_llm": "deepseek_default",
+                "script_llm": "deepseek_default",
+                "visual_llm": "deepseek_default",
+                "semantic_llm": "deepseek_default",
+                "image": "comfyui_default",
+                "comfyui_workflow": "history_image_default",
+                "voice": "yunyang_soft",
+                "subtitle": "social_pink",
+            }.items()
+        }
+        (parent / "profile_snapshot.json").write_text(
+            json.dumps(
+                {
+                    "profiles": profiles,
+                    "project_overrides": {
+                        "visual_strategy": "museum_and_ai",
+                        "candidates_per_shot": 4,
+                        "subtitle": {},
+                        "create_jianying_draft": True,
+                        "ai_disclosure": True,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parent / "script_manifest.json").write_text(
+            json.dumps({"target_duration_seconds": 45, "voice_profile": "yunyang_soft"}),
+            encoding="utf-8",
+        )
+        run = self.root / "outputs" / task_id
+        run.mkdir(parents=True)
+        required = {
+            "task.json": {
+                "task_id": task_id,
+                "project_id": parent_id,
+                "status": "succeeded",
+                "options": {"visual_mode": "sourced"},
+            },
+            "scene_plan.json": {},
+            "asset_candidates.json": {},
+            "asset_selection.json": {},
+            "assets_manifest.json": {},
+            "license_audit.json": {},
+        }
+        for name, payload in required.items():
+            (run / name).write_text(json.dumps(payload), encoding="utf-8")
+        (run / "licenses.csv").write_text("shot_id\n", encoding="utf-8")
+        before = {path.name: path.read_bytes() for path in parent.iterdir()}
+        draft = sw.create_revision_draft(task_id)
+        self.assertEqual(draft["original_script"], original)
+        self.assertEqual(draft["revision"]["parent_project_id"], parent_id)
+        fake_snapshot = {
+            "schema_version": 1,
+            "parent_project_id": parent_id,
+            "parent_task_id": task_id,
+            "sha256": "a" * 64,
+            "assets": [],
+        }
+        with mock.patch.object(sw, "create_reuse_source_snapshot", return_value=fake_snapshot):
+            derived = sw.lock_draft(
+                draft,
+                self._values(
+                    title="父成片修订",
+                    original_script=original,
+                    final_script="修改后的新脚本。",
+                ),
+            )
+        self.assertNotEqual(derived, parent)
+        self.assertEqual((derived / "script.txt").read_text(encoding="utf-8"), "修改后的新脚本。")
+        derived_config = yaml.safe_load((derived / "project.yaml").read_text(encoding="utf-8"))
+        self.assertTrue(derived_config["visuals"]["reuse"]["enabled"])
+        self.assertEqual(derived_config["revision"]["parent_task_id"], task_id)
+        self.assertTrue((derived / "reuse_source_snapshot.json").is_file())
+        self.assertEqual(before, {path.name: path.read_bytes() for path in parent.iterdir()})
+
     def test_local_server_escapes_html_checks_csrf_limits_body_and_shuts_down(self) -> None:
         draft = sw.create_draft()
         draft["title"] = '<script>alert("x")</script>'

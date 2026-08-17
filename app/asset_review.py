@@ -114,10 +114,16 @@ def validate_selection(
             raise ReviewError(
                 f"镜头 {shot_id} 选择了语义低相关候选；必须勾选风险确认后才能覆盖。"
             )
-        if asset_id == previous:
+        duplicate_override = bool(candidate.get("duplicate_override"))
+        if asset_id == previous and not duplicate_override:
             raise ReviewError("相邻镜头不能选择同一素材。")
         candidate_hash = str(candidate.get("perceptual_hash") or "")
-        if candidate_hash and previous_hash and candidate_hash == previous_hash:
+        if (
+            candidate_hash
+            and previous_hash
+            and candidate_hash == previous_hash
+            and not duplicate_override
+        ):
             raise ReviewError("相邻镜头不能选择感知哈希相同的重复素材。")
         previous = asset_id
         previous_hash = candidate_hash or None
@@ -136,6 +142,7 @@ def validate_selection(
                     "conflicts", []
                 ),
                 "semantic_override": semantic_rejected,
+                "duplicate_override": duplicate_override,
                 "candidate": candidate,
             }
         )

@@ -21,6 +21,13 @@ from PIL import Image, ImageOps
 
 from .jianying_text import add_rich_subtitles
 from .asset_review import prepare_and_deduplicate, run_review_server
+from .asset_reuse import (
+    AssetReuseError,
+    build_reuse_plan,
+    merge_reused_candidates,
+    run_reuse_review_server,
+    unmatched_scene_plan,
+)
 from .comfyui_client import ComfyUIError, resolve_workflow_path, validate_server_url
 from .openai_visuals import load_local_env
 from .visual_planner import VisualPlannerError, create_visual_plan_with_audit
@@ -44,7 +51,7 @@ from .mpt_runtime import (
     ensure_source_han_font,
     invoke_worker,
 )
-from .task_state import TaskState, find_task_dir
+from .task_state import REUSE_TASK_STAGES, TASK_STAGES, TaskState, find_task_dir
 from .transcript import (
     AlignmentQualityError,
     Cue,
@@ -65,10 +72,26 @@ SRT_TIME_RE = re.compile(
 )
 HARD_END = "。！？!?；;"
 SOFT_END = "，,：:"
+_SOURCE_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 class BuildError(RuntimeError):
     """A user-facing build failure."""
+
+
+def _source_sha256(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    cached = _SOURCE_DIGEST_CACHE.get(key)
+    if cached:
+        return cached
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    _SOURCE_DIGEST_CACHE[key] = value
+    return value
 
 
 def configure_pipeline_paths() -> None:
@@ -1200,6 +1223,7 @@ def render_shot(
     run_dir: Path,
     canvas: dict[str, Any],
     proxies: dict[str, Path],
+    cache_root: Path | None = None,
 ) -> Path:
     width = int(canvas["width"])
     height = int(canvas["height"])
@@ -1209,6 +1233,43 @@ def render_shot(
     output = run_dir / shot["rendered_clip"]
     output.parent.mkdir(parents=True, exist_ok=True)
     source = proxies.get(shot["source"], Path(shot["source"]))
+    render_cache: Path | None = None
+    if cache_root is not None:
+        source_digest = _source_sha256(source)
+        render_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "version": "shot-render-v1",
+                    "source_sha256": source_digest,
+                    "kind": shot["kind"],
+                    "source_start": shot.get("source_start", 0.0),
+                    "frames": frames,
+                    "duration": duration,
+                    "fit": shot["fit"],
+                    "focal_x": shot["focal_x"],
+                    "focal_y": shot["focal_y"],
+                    "motion": shot["motion"],
+                    "canvas": canvas,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        render_cache = cache_root / "clips" / f"{render_key}.mp4"
+        if render_cache.is_file() and render_cache.stat().st_size:
+            try:
+                cached_info = probe_media(render_cache)
+            except BuildError:
+                render_cache.unlink(missing_ok=True)
+            else:
+                if (
+                    cached_info.width == width
+                    and cached_info.height == height
+                    and abs(cached_info.duration - duration) <= max(0.12, 1 / fps)
+                ):
+                    shutil.copy2(render_cache, output)
+                    return output
+                render_cache.unlink(missing_ok=True)
 
     if shot["kind"] == "image":
         motion_config = canvas.get("motion", {})
@@ -1286,6 +1347,11 @@ def render_shot(
             output,
         ]
     )
+    if render_cache is not None:
+        render_cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = render_cache.with_suffix(".tmp.mp4")
+        shutil.copy2(output, temporary)
+        os.replace(temporary, render_cache)
     return output
 def _concat_clips(clips: Sequence[Path], run_dir: Path) -> Path:
     list_path = run_dir / "working" / "clips.ffconcat"
@@ -1775,11 +1841,16 @@ def _build_input_hash(
             if (script_path.parent / "profile_snapshot.json").is_file()
             else None
         ),
+        "reuse_source_snapshot": (
+            json.loads((script_path.parent / "reuse_source_snapshot.json").read_text(encoding="utf-8"))
+            if (script_path.parent / "reuse_source_snapshot.json").is_file()
+            else None
+        ),
         "media": media_signature,
         "skip_draft": skip_draft,
         "draft_root": str(draft_root.resolve()),
         "visual_mode": visual_mode,
-        "pipeline": "stage-4-v1",
+        "pipeline": "stage-7-v1",
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -1888,6 +1959,8 @@ def build_project(
         run_dir = output_root / f"{config['project']['id']}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=False)
         (run_dir / "working").mkdir()
+        reuse_config = config.get("visuals", {}).get("reuse", {})
+        reuse_enabled = bool(reuse_config.get("enabled")) and active_visual_mode == "sourced"
         task = TaskState.create(
             run_dir / "task.json",
             task_id=run_dir.name,
@@ -1899,7 +1972,18 @@ def build_project(
                 "skip_draft": skip_draft,
                 "visual_mode": active_visual_mode,
             },
+            stage_order=REUSE_TASK_STAGES if reuse_enabled else TASK_STAGES,
         )
+
+    reuse_config = config.get("visuals", {}).get("reuse", {})
+    reuse_enabled = bool(reuse_config.get("enabled")) and active_visual_mode == "sourced"
+    if reuse_enabled and tuple(task.stage_order) != REUSE_TASK_STAGES:
+        raise BuildError("派生项目必须使用 18 阶段任务；当前续跑任务与项目复用配置不兼容。")
+    stage_positions = {name: index for index, name in enumerate(task.stage_order, 1)}
+    stage_total = len(task.stage_order)
+
+    def stage_label(name: str) -> str:
+        return f"[{stage_positions[name]}/{stage_total}]"
 
     phase = "preflight"
     draft_path: Path | None = None
@@ -1918,9 +2002,9 @@ def build_project(
     voice_resolved: dict[str, Any] = resolve_voice_config(config["voice"])
     try:
         if task.can_reuse("preflight", input_hash):
-            print("[1/16] 复用：前置检查")
+            print(f"{stage_label('preflight')} 复用：前置检查")
         else:
-            print("[1/16] 检查 FFmpeg、文案、素材与任务输入...")
+            print(f"{stage_label('preflight')} 检查 FFmpeg、文案、素材与任务输入...")
             task.begin("preflight", input_hash)
             preflight_artifacts = [script_path]
             if active_visual_mode == "local":
@@ -1932,10 +2016,10 @@ def build_project(
         narration = run_dir / "narration.mp3"
         metadata = run_dir / "captions_metadata.jsonl"
         if task.can_reuse("voice", input_hash):
-            print("[2/16] 复用：中文配音")
+            print(f"{stage_label('voice')} 复用：中文配音")
             tts_cache_hit = True
         else:
-            print("[2/16] 生成或复用 MoneyPrinterTurbo 中文配音...")
+            print(f"{stage_label('voice')} 生成或复用 MoneyPrinterTurbo 中文配音...")
             task.begin("voice", input_hash)
             narration_raw, narration, metadata, tts_cache_hit, voice_resolved = create_or_reuse_tts(
                 text, config["voice"], run_dir
@@ -1951,11 +2035,11 @@ def build_project(
         alignment: dict[str, Any] | None = None
         if alignment_provider == "moneyprinter_whisper":
             if task.can_reuse("alignment", input_hash):
-                print("[3/16] 复用：Whisper 逐词时间轴")
+                print(f"{stage_label('alignment')} 复用：Whisper 逐词时间轴")
                 alignment = json.loads(alignment_path.read_text(encoding="utf-8"))
                 alignment_cache_hit = True
             else:
-                print("[3/16] 使用本地 Whisper large-v3 对齐逐词时间轴...")
+                print(f"{stage_label('alignment')} 使用本地 Whisper large-v3 对齐逐词时间轴...")
                 task.begin("alignment", input_hash)
                 initial_prompt = whisper_initial_prompt(
                     text,
@@ -1970,7 +2054,7 @@ def build_project(
                 )
                 task.succeed("alignment", input_hash, [alignment_path])
         elif alignment_provider == "edge_metadata":
-            print("[3/16] 兼容模式：使用 Edge 边界时间轴")
+            print(f"{stage_label('alignment')} 兼容模式：使用 Edge 边界时间轴")
             alignment = edge_metadata_alignment(metadata)
             if not task.can_reuse("alignment", input_hash):
                 task.begin("alignment", input_hash)
@@ -1986,11 +2070,11 @@ def build_project(
         emphasis_path = run_dir / "emphasis.json"
         font_dir = run_dir / "working" / "fonts"
         if task.can_reuse("captions", input_hash):
-            print("[4/16] 复用：稳定底稿和局部强调字幕")
+            print(f"{stage_label('captions')} 复用：稳定底稿和局部强调字幕")
             transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
             cues = cues_from_transcript(transcript)
         else:
-            print("[4/16] 生成稳定底稿和局部强调字幕...")
+            print(f"{stage_label('captions')} 生成稳定底稿和局部强调字幕...")
             task.begin("captions", input_hash)
             if alignment is not None:
                 try:
@@ -2110,10 +2194,10 @@ def build_project(
                 get_studio_paths(ROOT).cache_root / "visuals" / "scene-plan" / f"{plan_cache_key}-audit.json"
             )
             if task.can_reuse("visual_plan", input_hash):
-                print("[5/16] 复用：动态时代约束和镜头视觉意图")
+                print(f"{stage_label('visual_plan')} 复用：动态时代约束和镜头视觉意图")
                 scene_plan = json.loads(scene_plan_path.read_text(encoding="utf-8"))
             else:
-                print(f"[5/16] 用 {planner_provider} 生成动态时代约束并做语义审校...")
+                print(f"{stage_label('visual_plan')} 用 {planner_provider} 生成动态时代约束并做语义审校...")
                 task.begin("visual_plan", input_hash)
                 if plan_cache.is_file() and plan_audit_cache.is_file():
                     scene_plan = json.loads(plan_cache.read_text(encoding="utf-8"))
@@ -2143,12 +2227,121 @@ def build_project(
                     [scene_plan_path, plan_audit_path, response_snapshot],
                 )
 
+            reuse_snapshot: dict[str, Any] | None = None
+            reuse_selection: dict[str, Any] | None = None
+            supply_scene_plan = scene_plan
+            if reuse_enabled:
+                snapshot_name = str(
+                    config.get("revision", {}).get(
+                        "reuse_snapshot_file", "reuse_source_snapshot.json"
+                    )
+                )
+                if Path(snapshot_name).name != snapshot_name:
+                    raise BuildError("复用快照文件名无效。")
+                snapshot_path = project_dir / snapshot_name
+                if not snapshot_path.is_file():
+                    raise BuildError("派生项目缺少不可变 reuse_source_snapshot.json。")
+                reuse_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+
+                phase = "asset_reuse_match"
+                reuse_plan_path = run_dir / "asset_reuse_plan.json"
+                reuse_cache_key = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "scene_plan": scene_plan,
+                            "snapshot_sha256": reuse_snapshot.get("sha256"),
+                            "reuse": reuse_config,
+                            "planner": visuals_config.get("planner", {}),
+                            "prompt_version": "asset-reuse-match-v1",
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                reuse_cache = (
+                    get_studio_paths(ROOT).cache_root
+                    / "visuals"
+                    / "reuse-match"
+                    / f"{reuse_cache_key}.json"
+                )
+                if task.can_reuse("asset_reuse_match", input_hash):
+                    print(f"{stage_label('asset_reuse_match')} 复用：旧画面匹配结果")
+                    reuse_plan = json.loads(reuse_plan_path.read_text(encoding="utf-8"))
+                else:
+                    print(f"{stage_label('asset_reuse_match')} 匹配父成片已选素材与未选 AI 候选...")
+                    task.begin("asset_reuse_match", input_hash)
+                    try:
+                        if reuse_cache.is_file():
+                            reuse_plan = json.loads(reuse_cache.read_text(encoding="utf-8"))
+                        else:
+                            reuse_plan = build_reuse_plan(
+                                scene_plan,
+                                reuse_snapshot,
+                                reuse_config,
+                                visuals_config.get("planner", {}),
+                                env,
+                                get_studio_paths(ROOT).cache_root,
+                            )
+                            reuse_cache.parent.mkdir(parents=True, exist_ok=True)
+                            _write_json(reuse_cache, reuse_plan)
+                    except AssetReuseError as exc:
+                        raise BuildError(str(exc)) from exc
+                    _write_json(reuse_plan_path, reuse_plan)
+                    task.succeed("asset_reuse_match", input_hash, [reuse_plan_path])
+
+                phase = "asset_reuse_review"
+                reuse_selection_path = run_dir / "asset_reuse_selection.json"
+                reuse_report_path = run_dir / "reuse_report.json"
+                if task.can_reuse("asset_reuse_review", input_hash):
+                    print(f"{stage_label('asset_reuse_review')} 复用：旧画面人工匹配选择")
+                    reuse_selection = json.loads(reuse_selection_path.read_text(encoding="utf-8"))
+                else:
+                    print(f"{stage_label('asset_reuse_review')} 等待旧画面匹配审核...")
+                    task.begin("asset_reuse_review", input_hash)
+                    while not reuse_selection_path.is_file():
+                        task.wait_for_review(
+                            "asset_reuse_review", input_hash, [reuse_plan_path, snapshot_path]
+                        )
+                        review_status = run_reuse_review_server(
+                            run_dir,
+                            reuse_plan,
+                            reuse_snapshot,
+                            reuse_config,
+                            get_studio_paths(ROOT).cache_root,
+                            open_browser=True,
+                        )
+                        if review_status != "submitted":
+                            raise BuildError("画面复用审核尚未提交；任务保持 waiting_for_review。")
+                    reuse_selection = json.loads(reuse_selection_path.read_text(encoding="utf-8"))
+                    task.succeed(
+                        "asset_reuse_review",
+                        input_hash,
+                        [reuse_selection_path, reuse_report_path],
+                    )
+                supply_scene_plan = unmatched_scene_plan(scene_plan, reuse_selection)
+                # A human reuse choice is a downstream build input. Keep the
+                # task-level base hash stable for resume discovery, but salt
+                # every later stage so manually changing the selection cannot
+                # reuse search, downloads, clips or drafts from the wrong choice.
+                input_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "base_input_hash": input_hash,
+                            "reuse_snapshot_sha256": reuse_snapshot.get("sha256"),
+                            "reuse_selection": reuse_selection,
+                            "reuse_policy": reuse_config,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+
             phase = "asset_search"
             candidates_path = run_dir / "asset_candidates.json"
             search_cache_key = hashlib.sha256(
                 json.dumps(
                     {
-                        "scene_plan": scene_plan,
+                        "scene_plan": supply_scene_plan,
                         "visual_strategy": visual_strategy,
                         "search": search_config,
                         "credential_capabilities": {
@@ -2163,25 +2356,32 @@ def build_project(
             search_cache = get_studio_paths(ROOT).cache_root / "visuals" / "search" / f"{search_cache_key}.json"
             if task.can_reuse("asset_search", input_hash):
                 label = "纯 AI 空候选清单" if visual_strategy == "ai_only" else "馆藏搜索结果"
-                print(f"[6/16] 复用：{label}")
+                print(f"{stage_label('asset_search')} 复用：{label}")
                 candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
             else:
                 task.begin("asset_search", input_hash)
                 if visual_strategy == "ai_only":
                     print(
-                        "[6/16] 已选择纯 AI：跳过 The Met、Smithsonian、"
+                        f"{stage_label('asset_search')} 已选择纯 AI：跳过 The Met、Smithsonian、"
                         "Wikimedia 和 Openverse 网络搜索..."
                     )
                     candidates = build_ai_only_candidates(
-                        scene_plan, search_config
+                        supply_scene_plan, search_config
                     )
+                elif reuse_enabled and not supply_scene_plan.get("shots"):
+                    print(f"{stage_label('asset_search')} 全部镜头已复用：跳过馆藏网络搜索...")
+                    candidates = build_ai_only_candidates(supply_scene_plan, search_config)
+                    candidates["visual_strategy"] = visual_strategy
+                    candidates["search_skip_reason"] = "all_shots_reused"
+                    for status in candidates.get("provider_status", {}).values():
+                        status["message"] = "全部新镜头已确认复用旧画面，未发起馆藏网络搜索。"
                 else:
-                    print("[6/16] 搜索 The Met、Smithsonian、Wikimedia 和 Openverse...")
+                    print(f"{stage_label('asset_search')} 搜索 The Met、Smithsonian、Wikimedia 和 Openverse...")
                     if search_cache.is_file():
                         candidates = json.loads(search_cache.read_text(encoding="utf-8"))
                     else:
                         try:
-                            candidates = build_search_results(scene_plan, search_config, env)
+                            candidates = build_search_results(supply_scene_plan, search_config, env)
                         except VisualSupplyError as exc:
                             raise BuildError(str(exc)) from exc
                         if not any(
@@ -2202,15 +2402,25 @@ def build_project(
             semantic_review_path = run_dir / "asset_semantic_review.json"
             if task.can_reuse("asset_semantic_review", input_hash):
                 label = "纯 AI 无馆藏候选" if visual_strategy == "ai_only" else "DeepSeek 馆藏候选语义复核"
-                print(f"[7/16] 复用：{label}")
+                print(f"{stage_label('asset_semantic_review')} 复用：{label}")
                 candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
                 semantic_review = json.loads(
                     semantic_review_path.read_text(encoding="utf-8")
                 )
             else:
                 task.begin("asset_semantic_review", input_hash)
-                if visual_strategy == "ai_only":
-                    print("[7/16] 已选择纯 AI：没有馆藏候选，跳过候选语义复核...")
+                if reuse_enabled and not supply_scene_plan.get("shots"):
+                    print(f"{stage_label('asset_semantic_review')} 全部镜头已复用：跳过馆藏候选语义复核...")
+                    semantic_review = {
+                        "schema_version": 1,
+                        "status": "not_applicable",
+                        "reason": "all_shots_reused",
+                        "provider": None,
+                        "batches": [],
+                    }
+                    semantic_artifacts = []
+                elif visual_strategy == "ai_only":
+                    print(f"{stage_label('asset_semantic_review')} 已选择纯 AI：没有馆藏候选，跳过候选语义复核...")
                     semantic_review = {
                         "schema_version": 1,
                         "status": "not_applicable",
@@ -2220,10 +2430,10 @@ def build_project(
                     }
                     semantic_artifacts = []
                 else:
-                    print("[7/16] 用 DeepSeek 批量复核候选的时代、主题和画面相关性...")
+                    print(f"{stage_label('asset_semantic_review')} 用 DeepSeek 批量复核候选的时代、主题和画面相关性...")
                     try:
                         candidates, semantic_review, semantic_artifacts = review_asset_candidates(
-                            scene_plan,
+                            supply_scene_plan,
                             candidates,
                             visuals_config.get("planner", {}),
                             search_config,
@@ -2242,7 +2452,7 @@ def build_project(
 
             phase = "ai_fallback"
             if task.can_reuse("ai_fallback", input_hash):
-                print("[8/16] 复用：AI 候选")
+                print(f"{stage_label('ai_fallback')} 复用：AI 候选")
                 candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
             else:
                 ai_provider = str(
@@ -2254,22 +2464,36 @@ def build_project(
                     )
                 )
                 print(
-                    f"[8/16] 为每个镜头准备 {ai_count} 张 {ai_provider} "
+                    f"{stage_label('ai_fallback')} 为每个待补镜头准备 {ai_count} 张 {ai_provider} "
                     "AI 候选并检查额度..."
                 )
                 task.begin("ai_fallback", input_hash)
                 try:
-                    candidates, generated = add_ai_fallbacks(
-                        candidates,
-                        scene_plan,
-                        visuals_config.get("ai_fallback", {}),
-                        env,
-                        get_studio_paths(ROOT).cache_root,
-                        provenance_dir,
-                        project_dir,
-                        candidates_path,
-                    )
+                    if reuse_enabled and not supply_scene_plan.get("shots"):
+                        generated = []
+                    else:
+                        candidates, generated = add_ai_fallbacks(
+                            candidates,
+                            supply_scene_plan,
+                            visuals_config.get("ai_fallback", {}),
+                            env,
+                            get_studio_paths(ROOT).cache_root,
+                            provenance_dir,
+                            project_dir,
+                            candidates_path,
+                        )
+                    if reuse_enabled:
+                        assert reuse_snapshot is not None and reuse_selection is not None
+                        candidates = merge_reused_candidates(
+                            scene_plan,
+                            candidates,
+                            reuse_selection,
+                            reuse_snapshot,
+                            get_studio_paths(ROOT).cache_root,
+                        )
                 except VisualSupplyError as exc:
+                    raise BuildError(str(exc)) from exc
+                except AssetReuseError as exc:
                     raise BuildError(str(exc)) from exc
                 _write_json(candidates_path, candidates)
                 task.succeed("ai_fallback", input_hash, [candidates_path, *generated])
@@ -2277,10 +2501,10 @@ def build_project(
             phase = "asset_review"
             selection_path = run_dir / "asset_selection.json"
             if task.can_reuse("asset_review", input_hash):
-                print("[9/16] 复用：人工素材选择")
+                print(f"{stage_label('asset_review')} 复用：人工素材选择")
                 selection = json.loads(selection_path.read_text(encoding="utf-8"))
             else:
-                print("[9/16] 等待一次最终素材审核...")
+                print(f"{stage_label('asset_review')} 等待一次最终素材审核...")
                 task.begin("asset_review", input_hash)
                 while not selection_path.is_file():
                     task.wait_for_review("asset_review", input_hash, [candidates_path])
@@ -2335,6 +2559,17 @@ def build_project(
                 selection = json.loads(selection_path.read_text(encoding="utf-8"))
                 task.succeed("asset_review", input_hash, [selection_path])
 
+            input_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "upstream_input_hash": input_hash,
+                        "asset_selection": selection,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
             phase = "asset_download"
             manifest_path = run_dir / "assets_manifest.json"
             reuse_asset_download = task.can_reuse("asset_download", input_hash)
@@ -2345,11 +2580,11 @@ def build_project(
                 except VisualSupplyError as exc:
                     reuse_asset_download = False
                     task.invalidate_after("asset_download")
-                    print(f"[10/16] 已发现旧素材损坏，将重新下载：{exc}")
+                    print(f"{stage_label('asset_download')} 已发现旧素材损坏，将重新下载：{exc}")
                 else:
-                    print("[10/16] 复用：内容寻址素材缓存（完整解码已通过）")
+                    print(f"{stage_label('asset_download')} 复用：内容寻址素材缓存（完整解码已通过）")
             if not reuse_asset_download:
-                print("[10/16] 复核授权并下载审核通过的原图...")
+                print(f"{stage_label('asset_download')} 复核授权并下载审核通过的原图...")
                 task.begin("asset_download", input_hash)
                 try:
                     manifest = download_selected_assets(
@@ -2363,10 +2598,10 @@ def build_project(
             phase = "license_audit"
             audit_path = run_dir / "license_audit.json"
             if task.can_reuse("license_audit", input_hash):
-                print("[11/16] 复用：许可证台账")
+                print(f"{stage_label('license_audit')} 复用：许可证台账")
                 asset_audit = json.loads(audit_path.read_text(encoding="utf-8"))
             else:
-                print("[11/16] 生成许可证台账、Credits 和 AI 说明...")
+                print(f"{stage_label('license_audit')} 生成许可证台账、Credits 和 AI 说明...")
                 task.begin("license_audit", input_hash)
                 try:
                     licenses, credits, ai_disclosure, asset_audit = write_license_outputs(
@@ -2414,12 +2649,12 @@ def build_project(
         phase = "storyboard"
         storyboard_path = run_dir / "storyboard.json"
         if task.can_reuse("storyboard", input_hash):
-            print("[12/16] 复用：storyboard v2")
+            print(f"{stage_label('storyboard')} 复用：storyboard v2")
             storyboard = json.loads(storyboard_path.read_text(encoding="utf-8"))
             if active_visual_mode == "local":
                 media, excluded = _list_media(raw_dir, config["media"])
         else:
-            print("[12/16] 生成 storyboard v2...")
+            print(f"{stage_label('storyboard')} 生成 storyboard v2...")
             task.begin("storyboard", input_hash)
             if active_visual_mode == "sourced":
                 assert manifest is not None
@@ -2450,9 +2685,9 @@ def build_project(
         phase = "clips"
         clips = [run_dir / shot["rendered_clip"] for shot in storyboard["shots"]]
         if task.can_reuse("clips", input_hash):
-            print("[13/16] 复用：预渲染竖屏镜头")
+            print(f"{stage_label('clips')} 复用：预渲染竖屏镜头")
         else:
-            print("[13/16] 生成图片代理并预渲染竖屏镜头...")
+            print(f"{stage_label('clips')} 生成图片代理并预渲染竖屏镜头...")
             task.begin("clips", input_hash)
             proxies = _prepare_image_proxies(storyboard, run_dir)
             clips = []
@@ -2461,15 +2696,23 @@ def build_project(
                     f"      镜头 {index:02d}/{len(storyboard['shots']):02d}: "
                     f"{shot['source_name']} ({shot['fit']})"
                 )
-                clips.append(render_shot(shot, run_dir, config["canvas"], proxies))
+                clips.append(
+                    render_shot(
+                        shot,
+                        run_dir,
+                        config["canvas"],
+                        proxies,
+                        get_studio_paths(ROOT).cache_root / "render",
+                    )
+                )
             task.succeed("clips", input_hash, clips)
 
         phase = "preview"
         preview = run_dir / config["output"]["preview_filename"]
         if task.can_reuse("preview", input_hash):
-            print("[14/16] 复用：字幕预览 MP4")
+            print(f"{stage_label('preview')} 复用：字幕预览 MP4")
         else:
-            print("[14/16] 合并镜头并渲染字幕预览 MP4...")
+            print(f"{stage_label('preview')} 合并镜头并渲染字幕预览 MP4...")
             task.begin("preview", input_hash)
             visuals = _concat_clips(clips, run_dir)
             preview = _render_preview(
@@ -2484,16 +2727,16 @@ def build_project(
 
         phase = "draft"
         if skip_draft:
-            print("[15/16] 已按参数跳过剪映草稿。")
+            print(f"{stage_label('draft')} 已按参数跳过剪映草稿。")
             if not task.can_reuse("draft", input_hash):
                 task.begin("draft", input_hash)
                 task.succeed("draft", input_hash)
         elif task.can_reuse("draft", input_hash):
-            print("[15/16] 复用：剪映可编辑富文本草稿")
+            print(f"{stage_label('draft')} 复用：剪映可编辑富文本草稿")
             draft_path_text = storyboard.get("draft_path")
             draft_path = Path(draft_path_text) if draft_path_text else None
         else:
-            print("[15/16] 生成剪映可编辑富文本草稿...")
+            print(f"{stage_label('draft')} 生成剪映可编辑富文本草稿...")
             task.begin("draft", input_hash)
             configured_root = Path(
                 str(config.get("jianying", {}).get("draft_root") or discover_jianying_draft_root())
@@ -2520,10 +2763,10 @@ def build_project(
 
         phase = "validation"
         if task.can_reuse("validation", input_hash):
-            print("[16/16] 复用：自动验收")
+            print(f"{stage_label('validation')} 复用：自动验收")
             validation = json.loads((run_dir / "validation.json").read_text(encoding="utf-8"))
         else:
-            print("[16/16] 验证分辨率、时长、字幕、授权追踪和草稿结构...")
+            print(f"{stage_label('validation')} 验证分辨率、时长、字幕、授权追踪和草稿结构...")
             task.begin("validation", input_hash)
             validation = validate_run(run_dir)
             if not validation["success"]:
@@ -2549,6 +2792,7 @@ def build_project(
                 if active_visual_mode == "sourced"
                 else "local"
             ),
+            "revision": config.get("revision"),
             **asset_audit,
             "voice": voice_resolved,
             "tts_cache_hit": tts_cache_hit,
@@ -2581,6 +2825,9 @@ def build_project(
                 "storyboard": str(storyboard_path),
                 "scene_plan": str(run_dir / "scene_plan.json") if active_visual_mode == "sourced" else None,
                 "scene_plan_audit": str(run_dir / "scene_plan_audit.json") if active_visual_mode == "sourced" else None,
+                "asset_reuse_plan": str(run_dir / "asset_reuse_plan.json") if reuse_enabled else None,
+                "asset_reuse_selection": str(run_dir / "asset_reuse_selection.json") if reuse_enabled else None,
+                "reuse_report": str(run_dir / "reuse_report.json") if reuse_enabled else None,
                 "asset_candidates": str(run_dir / "asset_candidates.json") if active_visual_mode == "sourced" else None,
                 "asset_semantic_review": str(run_dir / "asset_semantic_review.json") if active_visual_mode == "sourced" else None,
                 "asset_selection": str(run_dir / "asset_selection.json") if active_visual_mode == "sourced" else None,

@@ -18,6 +18,11 @@ from typing import Any, Callable
 import yaml
 
 from .deepseek_planner import DeepSeekPlannerError, request_json_object
+from .asset_reuse import (
+    AssetReuseError,
+    create_reuse_source_snapshot,
+    resolve_parent_task,
+)
 from .openai_visuals import load_local_env
 from .studio_profiles import ProfileError, ProfileStore, snapshot_hash
 from .studio_settings import SecretStore, SettingsStore, discover_jianying_draft_root, get_studio_paths
@@ -204,6 +209,71 @@ def create_draft() -> dict[str, Any]:
         "updated_at": now,
         "locked_project_id": None,
     }
+    save_draft(data)
+    return data
+
+
+def create_revision_draft(parent_task_id: str) -> dict[str, Any]:
+    """Create an editable draft derived from one successful sourced task."""
+    paths = get_studio_paths(ROOT)
+    run_dir = resolve_parent_task(paths.output_root, parent_task_id)
+    task = json.loads((run_dir / "task.json").read_text(encoding="utf-8"))
+    parent_project_id = str(task.get("project_id") or "")
+    parent_project = paths.project_root / parent_project_id
+    if not parent_project.is_dir():
+        legacy = ROOT / "projects" / parent_project_id
+        parent_project = legacy if legacy.is_dir() else parent_project
+    required = ["script.txt", "project.yaml", "profile_snapshot.json", "script_manifest.json"]
+    missing = [name for name in required if not (parent_project / name).is_file()]
+    if missing:
+        raise ScriptWorkbenchError("父项目不完整，缺少：" + "、".join(missing))
+    try:
+        config = yaml.safe_load((parent_project / "project.yaml").read_text(encoding="utf-8"))
+        snapshot = json.loads((parent_project / "profile_snapshot.json").read_text(encoding="utf-8"))
+        manifest = json.loads((parent_project / "script_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise ScriptWorkbenchError("父项目配置无法读取。") from exc
+    if not isinstance(config, dict) or not isinstance(snapshot, dict) or not isinstance(manifest, dict):
+        raise ScriptWorkbenchError("父项目配置格式无效。")
+    data = create_draft()
+    profiles = snapshot.get("profiles") if isinstance(snapshot.get("profiles"), dict) else {}
+    profile_id = lambda name, fallback: str((profiles.get(name) or {}).get("id") or fallback)
+    overrides = snapshot.get("project_overrides") if isinstance(snapshot.get("project_overrides"), dict) else {}
+    script = (parent_project / "script.txt").read_text(encoding="utf-8")
+    data.update(
+        {
+            "mode": "direct",
+            "title": str(config.get("project", {}).get("title") or parent_project_id) + "（修订）",
+            "duration_seconds": int(manifest.get("target_duration_seconds") or 60),
+            "voice_profile": profile_id("voice", manifest.get("voice_profile") or default_voice_profile()),
+            "llm_profile": profile_id("default_llm", "deepseek_default"),
+            "script_llm_profile": profile_id("script_llm", "deepseek_default"),
+            "visual_llm_profile": profile_id("visual_llm", "deepseek_default"),
+            "semantic_llm_profile": profile_id("semantic_llm", "deepseek_default"),
+            "image_profile": profile_id("image", "comfyui_default"),
+            "comfyui_workflow_profile": profile_id("comfyui_workflow", "history_image_default"),
+            "subtitle_profile": profile_id("subtitle", "social_pink"),
+            "candidates_per_shot": int(overrides.get("candidates_per_shot") or config.get("visuals", {}).get("ai_fallback", {}).get("candidates_per_shot", 4)),
+            "subtitle_overrides": dict(overrides.get("subtitle") or {}),
+            "create_jianying_draft": bool(overrides.get("create_jianying_draft", True)),
+            "ai_disclosure": bool(overrides.get("ai_disclosure", True)),
+            "visual_strategy": str(overrides.get("visual_strategy") or config.get("visuals", {}).get("strategy") or "museum_and_ai"),
+            "original_script": script,
+            "final_script": script,
+            "revision": {
+                "parent_project_id": parent_project_id,
+                "parent_task_id": str(task.get("task_id") or run_dir.name),
+                "parent_script_sha256": _hash_text(script),
+                "scope": "selected_and_ai",
+                "generate_for_reused": False,
+                "max_uses_per_asset": 1,
+                "allow_manual_duplicate": True,
+                "recommendation_threshold": 75,
+                "alternative_threshold": 55,
+                "require_review": True,
+            },
+        }
+    )
     save_draft(data)
     return data
 
@@ -587,7 +657,18 @@ def lock_draft(data: dict[str, Any], values: dict[str, list[str]]) -> Path:
     temporary = paths.project_root / f".{project_id}.tmp-{secrets.token_hex(4)}"
     temporary.mkdir(parents=False, exist_ok=False)
     try:
-        config = yaml.safe_load(TEMPLATE_PATH.read_text(encoding="utf-8"))
+        revision = data.get("revision") if isinstance(data.get("revision"), dict) else None
+        if revision:
+            parent_project_id = str(revision.get("parent_project_id") or "")
+            parent_project = paths.project_root / parent_project_id
+            if not parent_project.is_dir() and (ROOT / "projects" / parent_project_id).is_dir():
+                parent_project = ROOT / "projects" / parent_project_id
+            parent_config_path = parent_project / "project.yaml"
+            if not parent_config_path.is_file():
+                raise ScriptWorkbenchError("父项目配置已丢失，不能建立派生项目。")
+            config = yaml.safe_load(parent_config_path.read_text(encoding="utf-8"))
+        else:
+            config = yaml.safe_load(TEMPLATE_PATH.read_text(encoding="utf-8"))
         config["project"]["id"] = project_id
         config["project"]["title"] = title
         profile_store = ProfileStore(paths)
@@ -692,6 +773,32 @@ def lock_draft(data: dict[str, Any], values: dict[str, list[str]]) -> Path:
         )
         config["media"]["seed"] = int(hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:8], 16)
         config["jianying"]["draft_name_prefix"] = f"AI-History-{project_id.removeprefix('history-')}"
+        if revision:
+            try:
+                reuse_snapshot = create_reuse_source_snapshot(
+                    paths.output_root,
+                    paths.cache_root,
+                    str(revision.get("parent_task_id") or ""),
+                )
+            except AssetReuseError as exc:
+                raise ScriptWorkbenchError(str(exc)) from exc
+            _atomic_json(temporary / "reuse_source_snapshot.json", reuse_snapshot)
+            config["revision"] = {
+                "parent_project_id": reuse_snapshot["parent_project_id"],
+                "parent_task_id": reuse_snapshot["parent_task_id"],
+                "reuse_snapshot_file": "reuse_source_snapshot.json",
+            }
+            config.setdefault("visuals", {})["reuse"] = {
+                "enabled": True,
+                "scope": "selected_and_ai",
+                "generate_for_reused": False,
+                "max_uses_per_asset": int(revision.get("max_uses_per_asset", 1)),
+                "allow_manual_duplicate": bool(revision.get("allow_manual_duplicate", True)),
+                "recommendation_threshold": int(revision.get("recommendation_threshold", 75)),
+                "alternative_threshold": int(revision.get("alternative_threshold", 55)),
+                "shots_per_batch": 4,
+                "require_review": bool(revision.get("require_review", True)),
+            }
         suggestions = data.get("suggestions") if isinstance(data.get("suggestions"), dict) else {}
         emphasis = config["subtitles"]["emphasis"]
         emphasis["include"] = _parse_lines(values.get("emphasis", [""])[0]) or _clean_string_list(suggestions.get("emphasis"))
@@ -724,6 +831,14 @@ def lock_draft(data: dict[str, Any], values: dict[str, list[str]]) -> Path:
             "create_jianying_draft": data.get("create_jianying_draft"),
             "ai_disclosure": data.get("ai_disclosure"),
         }
+        if revision:
+            snapshot["derived_from"] = {
+                "parent_project_id": revision.get("parent_project_id"),
+                "parent_task_id": revision.get("parent_task_id"),
+                "parent_script_sha256": revision.get("parent_script_sha256"),
+                "reuse_snapshot_sha256": reuse_snapshot.get("sha256"),
+                "derived_at": _now(),
+            }
         snapshot["sha256"] = snapshot_hash(snapshot)
         _atomic_json(temporary / "profile_snapshot.json", snapshot)
         (temporary / "script.txt").write_text(script, encoding="utf-8")
@@ -770,6 +885,14 @@ def lock_draft(data: dict[str, Any], values: dict[str, list[str]]) -> Path:
             "locked_at": _now(),
             "publish_ready": False,
         }
+        if revision:
+            manifest["derived_from"] = {
+                "parent_project_id": revision.get("parent_project_id"),
+                "parent_task_id": revision.get("parent_task_id"),
+                "parent_script_sha256": revision.get("parent_script_sha256"),
+                "reuse_snapshot_sha256": reuse_snapshot.get("sha256"),
+                "derived_at": _now(),
+            }
         _atomic_json(temporary / "script_manifest.json", manifest)
         os.replace(temporary, final_dir)
     except Exception:

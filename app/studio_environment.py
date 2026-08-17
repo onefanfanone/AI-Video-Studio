@@ -18,7 +18,7 @@ from .mpt_runtime import MPT_COMMIT
 from .studio_settings import SettingsStore, StudioPaths, get_studio_paths
 
 
-APP_VERSION = "0.6.3"
+APP_VERSION = "0.7.0"
 
 
 def _command(args: list[str], timeout: int = 8) -> tuple[int, str]:
