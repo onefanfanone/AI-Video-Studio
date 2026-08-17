@@ -4,10 +4,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.pipeline import (
+    BuildError,
     Cue,
     _zoompan_filter,
+    build_project,
     merge_cues,
     parse_edge_metadata,
     parse_srt,
@@ -43,6 +47,94 @@ class MotionFilterTests(unittest.TestCase):
 
         self.assertIn("z='1.0'", result)
         self.assertIn("x='0'", result)
+
+
+class WhisperBuildBranchTests(unittest.TestCase):
+    def test_new_whisper_alignment_uses_resolved_voice_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            project_dir = root / "project"
+            output_root = root / "outputs"
+            raw_dir = root / "raw"
+            draft_root = root / "drafts"
+            for path in (project_dir, output_root, raw_dir, draft_root):
+                path.mkdir()
+            script_path = project_dir / "script.txt"
+            script_path.write_text("化学家舍勒发现了这种颜料。", encoding="utf-8")
+            config = {
+                "version": 1,
+                "project": {"id": "whisper-branch-test", "script_file": "script.txt"},
+                "voice": {
+                    "voice": "zh-CN-YunyangNeural",
+                    "pronunciation": {"舍勒": "Shè lè"},
+                },
+                "subtitles": {
+                    "style_preset": "history_clean",
+                    "alignment_provider": "moneyprinter_whisper",
+                },
+                "visuals": {"mode": "local"},
+            }
+            resolved_voice = {
+                **config["voice"],
+                "provider": "moneyprinter_edge",
+                "profile": "snapshot",
+                "label": "zh-CN-YunyangNeural",
+                "rate": "+0%",
+                "pitch": "+0Hz",
+                "pauses": {},
+            }
+            observed_prompt: list[str] = []
+
+            def fake_tts(text: str, voice: dict, run_dir: Path):
+                raw = run_dir / "narration.raw.mp3"
+                normalized = run_dir / "narration.mp3"
+                metadata = run_dir / "captions_metadata.jsonl"
+                raw.write_bytes(b"test")
+                normalized.write_bytes(b"test")
+                metadata.write_text("{}\n", encoding="utf-8")
+                return raw, normalized, metadata, False, resolved_voice
+
+            def fake_alignment(
+                narration: Path,
+                subtitle_config: dict,
+                run_dir: Path,
+                *,
+                initial_prompt: str = "",
+            ):
+                observed_prompt.append(initial_prompt)
+                path = run_dir / "working" / "alignment.json"
+                payload = {"words": []}
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                return payload, path, False
+
+            with (
+                patch("app.pipeline.configure_pipeline_paths"),
+                patch("app.pipeline._resolve_project", return_value=project_dir),
+                patch("app.pipeline._load_config", return_value=config),
+                patch(
+                    "app.pipeline._preflight",
+                    return_value=(script_path, raw_dir, draft_root),
+                ),
+                patch("app.pipeline._build_input_hash", return_value="test-hash"),
+                patch(
+                    "app.pipeline.get_studio_paths",
+                    return_value=SimpleNamespace(output_root=output_root),
+                ),
+                patch("app.pipeline.create_or_reuse_tts", side_effect=fake_tts),
+                patch("app.pipeline.probe_audio_duration", return_value=2.0),
+                patch(
+                    "app.pipeline.create_or_reuse_alignment",
+                    side_effect=fake_alignment,
+                ),
+                patch(
+                    "app.pipeline.build_transcript",
+                    side_effect=BuildError("stop-after-alignment"),
+                ),
+            ):
+                with self.assertRaisesRegex(BuildError, "stop-after-alignment"):
+                    build_project("ignored", skip_draft=True)
+
+            self.assertEqual(observed_prompt, ["舍勒"])
 
 
 class SubtitleTests(unittest.TestCase):

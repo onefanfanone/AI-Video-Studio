@@ -1959,7 +1959,7 @@ def build_project(
                 task.begin("alignment", input_hash)
                 initial_prompt = whisper_initial_prompt(
                     text,
-                    voice_config,
+                    voice_resolved,
                     subtitle_config,
                 )
                 alignment, alignment_path, alignment_cache_hit = create_or_reuse_alignment(
